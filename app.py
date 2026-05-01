@@ -4,11 +4,18 @@ import numpy as np
 from io import StringIO, BytesIO
 import json
 import os
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.datavalidation import DataValidation
+
+try:
+    import gspread
+    from google.oauth2.service_account import Credentials
+    GSPREAD_AVAILABLE = True
+except ImportError:
+    GSPREAD_AVAILABLE = False
 
 # ============================================================
 # PAGE CONFIG
@@ -54,26 +61,199 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ============================================================
-# HISTORY FILE
+# GOOGLE SHEETS CONNECTION
 # ============================================================
+SCOPES = [
+    'https://www.googleapis.com/auth/spreadsheets',
+    'https://www.googleapis.com/auth/drive',
+]
+
+HISTORY_COLS = [
+    'date', 'sup_cbd', 'our_eup', 'diff',
+    'matched_count', 'sup_only_count', 'sup_only_cbd',
+    'our_only_count', 'our_only_eup', 'real_gap',
+    'pending_count', 'refunds_eup', 'net_billed'
+]
+
+# Detail columns saved per transaction for cross-day matching
+DETAIL_COLS = [
+    'date', 'category', 'phone', 'operator',
+    'product', 'amount', 'supplier_date', 'our_date', 'reason'
+]
+
+@st.cache_resource
+def get_gspread_client():
+    if not GSPREAD_AVAILABLE:
+        return None
+    try:
+        creds_dict = dict(st.secrets["gcp_service_account"])
+        creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
+        return gspread.authorize(creds)
+    except Exception:
+        return None
+
+def get_spreadsheet():
+    gc = get_gspread_client()
+    if gc is None:
+        return None
+    try:
+        spreadsheet_id = st.secrets["google_sheets"]["spreadsheet_id"]
+        return gc.open_by_key(spreadsheet_id)
+    except Exception:
+        return None
+
+def get_or_create_sheet(sh, title, headers):
+    """Get existing sheet or create new one with headers"""
+    try:
+        ws = sh.worksheet(title)
+        return ws
+    except gspread.WorksheetNotFound:
+        ws = sh.add_worksheet(title=title, rows=1000, cols=len(headers))
+        ws.append_row(headers)
+        return ws
+
+def load_history(month=None):
+    """Load history from Google Sheets. If month given (YYYY-MM), load that month's sheet."""
+    sh = get_spreadsheet()
+    if sh is None:
+        return _load_local_history()
+    try:
+        if month:
+            sheet_title = datetime.strptime(month, '%Y-%m').strftime('%B %Y')
+        else:
+            # Load all months
+            all_records = []
+            for ws in sh.worksheets():
+                if _is_month_sheet(ws.title):
+                    try:
+                        records = ws.get_all_records()
+                        all_records.extend(records)
+                    except Exception:
+                        pass
+            return sorted(all_records, key=lambda x: x.get('date', ''))
+
+        ws = get_or_create_sheet(sh, sheet_title, HISTORY_COLS)
+        return ws.get_all_records()
+    except Exception:
+        return _load_local_history()
+
+def _is_month_sheet(title):
+    months = ['January','February','March','April','May','June',
+              'July','August','September','October','November','December']
+    return any(m in title for m in months)
+
+def save_to_sheets(record):
+    """Save daily summary to the correct month sheet in Google Sheets"""
+    sh = get_spreadsheet()
+    if sh is None:
+        _save_local_history(record)
+        return False, "Google Sheets not connected — saved locally"
+    try:
+        # Month sheet name e.g. "May 2026"
+        dt = datetime.strptime(record['date'], '%Y-%m-%d')
+        sheet_title = dt.strftime('%B %Y')
+        ws = get_or_create_sheet(sh, sheet_title, HISTORY_COLS)
+
+        # Check if date already exists — update if so
+        existing = ws.get_all_records()
+        for i, row in enumerate(existing):
+            if row.get('date') == record['date']:
+                row_num = i + 2  # +1 header, +1 1-indexed
+                ws.update(f'A{row_num}', [[record.get(c, '') for c in HISTORY_COLS]])
+                return True, f"Updated existing record for {record['date']} in '{sheet_title}'"
+
+        # Append new row
+        ws.append_row([record.get(c, '') for c in HISTORY_COLS])
+        return True, f"Saved to '{sheet_title}' sheet"
+    except Exception as e:
+        _save_local_history(record)
+        return False, f"Sheets error: {e} — saved locally"
+
+def save_details_to_sheets(report_date, result):
+    """Save phone-level details for cross-day matching"""
+    sh = get_spreadsheet()
+    if sh is None:
+        return
+    try:
+        ws = get_or_create_sheet(sh, 'Transaction Details', DETAIL_COLS)
+
+        rows = []
+        # Supplier only
+        for _, r in result['sup_only'].iterrows():
+            rows.append([report_date, 'Supplier Only', r.get('Phone_Display',''),
+                        '', r.get('Package',''), r.get('CBD',0),
+                        r.get('Sup_Date',''), '', r.get('Reason','')])
+        # Our only
+        for _, r in result['our_only'].iterrows():
+            rows.append([report_date, 'Our Only', r.get('Phone_Display',''),
+                        r.get('Operator',''), r.get('Product Name',''),
+                        r.get('End User Price',0), '', r.get('Date & Time',''),
+                        r.get('Reason','')])
+
+        if rows:
+            # Remove existing rows for this date
+            all_data = ws.get_all_records()
+            keep = [r for r in all_data if r.get('date') != report_date]
+            ws.clear()
+            ws.append_row(DETAIL_COLS)
+            if keep:
+                ws.append_rows([[r.get(c,'') for c in DETAIL_COLS] for r in keep])
+            ws.append_rows(rows)
+    except Exception:
+        pass
+
+def cross_day_match(result, report_date):
+    """Find phones from 'Our Only' today that were 'Supplier Only' yesterday, or vice versa"""
+    sh = get_spreadsheet()
+    if sh is None:
+        return [], []
+    try:
+        ws = sh.worksheet('Transaction Details')
+        all_details = ws.get_all_records()
+        df = pd.DataFrame(all_details)
+        if df.empty:
+            return [], []
+
+        # Yesterday's supplier only phones
+        dt = datetime.strptime(report_date, '%Y-%m-%d')
+        yesterday = (dt - timedelta(days=1)).strftime('%Y-%m-%d')
+
+        yest_sup_only = set(df[(df['date']==yesterday) & (df['category']=='Supplier Only')]['phone'])
+
+        our_only_phones = set(result['our_only']['Phone_Display']) if len(result['our_only']) > 0 else set()
+        sup_only_phones = set(result['sup_only']['Phone_Display']) if len(result['sup_only']) > 0 else set()
+
+        # Our Only today that appeared as Supplier Only yesterday = date shift confirmed
+        confirmed_shifts_our  = list(our_only_phones & yest_sup_only)
+        # Supplier Only today that appeared as Our Only yesterday = date shift confirmed
+        confirmed_shifts_sup  = list(sup_only_phones & set(
+            df[(df['date']==yesterday) & (df['category']=='Our Only')]['phone']
+        ))
+
+        return confirmed_shifts_our, confirmed_shifts_sup
+    except Exception:
+        return [], []
+
+# ---- Local fallback (when Sheets not available) ----
 HISTORY_FILE = os.path.join(os.path.dirname(__file__), "history.json")
 
-def load_history():
+def _load_local_history():
     if os.path.exists(HISTORY_FILE):
         with open(HISTORY_FILE, 'r', encoding='utf-8') as f:
             return json.load(f)
     return []
 
-def save_history(history):
+def _save_local_history(record):
+    history = _load_local_history()
+    history = [h for h in history if h.get('date') != record.get('date')]
+    history.append(record)
+    history.sort(key=lambda x: x.get('date', ''))
     with open(HISTORY_FILE, 'w', encoding='utf-8') as f:
         json.dump(history, f, ensure_ascii=False, indent=2)
 
 def add_to_history(record):
-    history = load_history()
-    history = [h for h in history if h.get('date') != record.get('date')]
-    history.append(record)
-    history.sort(key=lambda x: x.get('date', ''))
-    save_history(history)
+    """Legacy wrapper — now saves to Sheets"""
+    save_to_sheets(record)
 
 # ============================================================
 # PHONE NORMALIZATION
@@ -725,6 +905,11 @@ def main():
                         label_visibility="collapsed")
         st.markdown("---")
         st.markdown("### 📊 History")
+        sh = get_spreadsheet()
+        if sh is not None:
+            st.success("✅ Google Sheets connected")
+        else:
+            st.warning("⚠️ Sheets not connected")
         history = load_history()
         if history:
             st.success(f"✅ {len(history)} days recorded")
@@ -781,6 +966,12 @@ def main():
                     result = run_reconciliation(sup_df, part_df, talk_df)
                     st.session_state['result'] = result
                     st.session_state['report_date'] = auto_date
+
+                    # Cross-day matching
+                    shifts_our, shifts_sup = cross_day_match(result, auto_date)
+                    st.session_state['shifts_our'] = shifts_our
+                    st.session_state['shifts_sup'] = shifts_sup
+
                     st.success("✅ Reconciliation complete!")
 
         # ---- RESULTS ----
@@ -791,6 +982,14 @@ def main():
 
             st.markdown("---")
             st.markdown("### 📊 Transaction Count Discrepancy")
+
+            # Cross-day shift banner
+            shifts_our = st.session_state.get('shifts_our', [])
+            shifts_sup = st.session_state.get('shifts_sup', [])
+            if shifts_our:
+                st.success(f"✅ Date Shift Confirmed: {len(shifts_our)} phone(s) from 'Our Only' found in yesterday's 'Supplier Only' — these are normal date shifts: {', '.join(shifts_our)}")
+            if shifts_sup:
+                st.success(f"✅ Date Shift Confirmed: {len(shifts_sup)} phone(s) from 'Supplier Only' found in yesterday's 'Our Only' — normal date shifts: {', '.join(shifts_sup)}")
 
             # Top metrics — focus on counts and real gap
             col1, col2, col3, col4, col5 = st.columns(5)
@@ -989,23 +1188,47 @@ def main():
                         'refunds_eup':      round(t['refunds_eup'], 2),
                         'net_billed':       round(t['partner_eup'] + t['talk012_eup'] + t['partner_ref'] + t['talk012_ref'], 2),
                     }
-                    add_to_history(record)
-                    st.success("✅ Saved to monthly history!")
+                    ok, msg = save_to_sheets(record)
+                    save_details_to_sheets(report_date_str, result)
+                    if ok:
+                        st.success(f"✅ {msg}")
+                    else:
+                        st.warning(f"⚠️ {msg}")
 
     # ============================================================
     # PAGE: MONTHLY SUMMARY
     # ============================================================
     elif page == "📅 Monthly Summary":
         st.markdown("## 📅 Monthly Summary")
-        history = load_history()
 
-        if not history:
+        # Get available months from Sheets
+        sh = get_spreadsheet()
+        available_months = []
+        if sh is not None:
+            try:
+                for ws in sh.worksheets():
+                    if _is_month_sheet(ws.title):
+                        try:
+                            dt = datetime.strptime(ws.title, '%B %Y')
+                            available_months.append(dt.strftime('%Y-%m'))
+                        except Exception:
+                            pass
+                available_months = sorted(set(available_months), reverse=True)
+            except Exception:
+                pass
+
+        if not available_months:
+            # Fallback to local
+            history = _load_local_history()
+            available_months = sorted(set(h['date'][:7] for h in history), reverse=True)
+
+        if not available_months:
             st.info("No history yet. Run daily reconciliations and click 'Save to Monthly History'.")
             return
 
-        months = sorted(set(h['date'][:7] for h in history), reverse=True)
-        selected_month = st.selectbox("Select Month", months)
-        month_history = [h for h in history if h['date'].startswith(selected_month)]
+        selected_month = st.selectbox("Select Month", available_months,
+                                      format_func=lambda m: datetime.strptime(m, '%Y-%m').strftime('%B %Y'))
+        month_history = load_history(month=selected_month)
 
         if not month_history:
             st.warning("No data for selected month")
@@ -1089,4 +1312,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
