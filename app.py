@@ -173,7 +173,7 @@ def save_details_to_sheets(report_date, result):
     """Save phone-level details for cross-day matching"""
     sh = get_spreadsheet()
     if sh is None:
-        return
+        return False, "Not connected"
     try:
         ws = get_or_create_sheet(sh, 'Transaction Details', DETAIL_COLS)
 
@@ -190,17 +190,18 @@ def save_details_to_sheets(report_date, result):
                         r.get('End User Price',0), '', r.get('Date & Time',''),
                         r.get('Reason','')])
 
+        # Always update — remove existing rows for this date then re-add
+        all_data = ws.get_all_records()
+        keep = [r for r in all_data if str(r.get('date','')) != str(report_date)]
+        ws.clear()
+        ws.append_row(DETAIL_COLS)
+        if keep:
+            ws.append_rows([[r.get(c,'') for c in DETAIL_COLS] for r in keep])
         if rows:
-            # Remove existing rows for this date
-            all_data = ws.get_all_records()
-            keep = [r for r in all_data if r.get('date') != report_date]
-            ws.clear()
-            ws.append_row(DETAIL_COLS)
-            if keep:
-                ws.append_rows([[r.get(c,'') for c in DETAIL_COLS] for r in keep])
             ws.append_rows(rows)
-    except Exception:
-        pass
+        return True, f"Saved {len(rows)} detail rows for {report_date}"
+    except Exception as e:
+        return False, f"Details save error: {e}"
 
 def cross_day_match(result, report_date):
     """Find phones from 'Our Only' today that were 'Supplier Only' yesterday, or vice versa"""
@@ -1189,11 +1190,15 @@ def main():
                         'net_billed':       round(t['partner_eup'] + t['talk012_eup'] + t['partner_ref'] + t['talk012_ref'], 2),
                     }
                     ok, msg = save_to_sheets(record)
-                    save_details_to_sheets(report_date_str, result)
+                    ok2, msg2 = save_details_to_sheets(report_date_str, result)
                     if ok:
                         st.success(f"✅ {msg}")
                     else:
                         st.warning(f"⚠️ {msg}")
+                    if ok2:
+                        st.info(f"📋 {msg2}")
+                    else:
+                        st.warning(f"⚠️ Details: {msg2}")
 
     # ============================================================
     # PAGE: MONTHLY SUMMARY
@@ -1312,3 +1317,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
