@@ -4,6 +4,7 @@ import numpy as np
 from io import StringIO, BytesIO
 import json
 import os
+import base64
 from datetime import datetime, date, timedelta
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
@@ -21,11 +22,36 @@ except ImportError:
 # PAGE CONFIG
 # ============================================================
 st.set_page_config(
-    page_title="Reconciliation Dashboard",
+    page_title="Reconciliation Dashboard Partner",
     page_icon="📊",
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
+# ============================================================
+# LOGOS (embedded base64)
+# ============================================================
+def load_logo(path, mime):
+    # Try multiple locations: repo folder, uploads folder
+    candidates = [
+        os.path.join(os.path.dirname(__file__), 'logos', os.path.basename(path)),
+        os.path.join(os.path.dirname(__file__), os.path.basename(path)),
+        path,
+    ]
+    for p in candidates:
+        try:
+            with open(p, 'rb') as f:
+                b64 = base64.b64encode(f.read()).decode()
+            return f"data:image/{mime};base64,{b64}"
+        except:
+            continue
+    return ""
+
+LOGO_PAYX    = load_logo("/mnt/user-data/uploads/payx_logo.svg", "svg+xml")
+LOGO_PARTNER = load_logo("/mnt/user-data/uploads/logo_partner_internet.png", "png")
+LOGO_012     = load_logo("/mnt/user-data/uploads/012TALK_לוג.png", "png")
+LOGO_PELE    = load_logo("/mnt/user-data/uploads/pelephoen.png", "png")
+LOGO_CELL    = load_logo("/mnt/user-data/uploads/cellcom.png", "png")
 
 # ============================================================
 # STYLES
@@ -35,783 +61,1550 @@ st.markdown("""
     .main-header {
         background: linear-gradient(135deg, #1F3864, #2E75B6);
         color: white;
-        padding: 20px 30px;
+        padding: 16px 24px;
         border-radius: 10px;
         margin-bottom: 20px;
+        display: flex;
+        align-items: center;
+        gap: 20px;
     }
-    .metric-card {
-        background: white;
+    .main-header h1 { margin: 0; font-size: 24px; }
+    .main-header p  { margin: 4px 0 0 0; opacity: 0.85; font-size: 13px; }
+    .logo-row { display: flex; align-items: center; gap: 16px; margin-bottom: 16px; }
+    .logo-row img { height: 36px; object-fit: contain; }
+    .action-box {
+        background: #1a1f2e;
+        border: 1px solid #e74c3c;
         border-radius: 8px;
-        padding: 15px;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.1);
-        border-left: 4px solid;
-        margin-bottom: 10px;
+        padding: 14px 18px;
+        margin-bottom: 16px;
     }
-    .metric-green  { border-left-color: #375623; }
-    .metric-red    { border-left-color: #C00000; }
-    .metric-orange { border-left-color: #C55A11; }
-    .metric-purple { border-left-color: #4A148C; }
-    .metric-teal   { border-left-color: #00695C; }
-    .status-ok     { color: #375623; font-weight: bold; }
-    .status-warn   { color: #C55A11; font-weight: bold; }
-    .status-err    { color: #C00000; font-weight: bold; }
-    .stDataFrame   { font-size: 12px; }
-    div[data-testid="stMetricValue"] { font-size: 28px; font-weight: bold; }
+    .action-box h4 { color: #e74c3c; margin: 0 0 10px 0; font-size: 14px; }
+    .stDataFrame { font-size: 12px; }
+    div[data-testid="stMetricValue"] { font-size: 26px; font-weight: bold; }
 </style>
 """, unsafe_allow_html=True)
 
 # ============================================================
-# GOOGLE SHEETS CONNECTION
+# CELLCOM PRICE MAP  (our EUP → expected supplier price)
 # ============================================================
-SCOPES = [
-    'https://www.googleapis.com/auth/spreadsheets',
-    'https://www.googleapis.com/auth/drive',
-]
+CELLCOM_FIXED = {19.0, 15.0, 49.0}   # no change
+CELLCOM_DISCOUNT = 5.0                 # all others: supplier = ours - 5
 
-HISTORY_COLS = [
-    'date', 'sup_cbd', 'our_eup', 'diff',
-    'matched_count', 'sup_only_count', 'sup_only_cbd',
-    'our_only_count', 'our_only_eup', 'real_gap',
-    'pending_count', 'refunds_eup', 'net_billed'
-]
+def cellcom_expected_supplier_price(our_eup):
+    if our_eup in CELLCOM_FIXED:
+        return our_eup
+    return round(our_eup - CELLCOM_DISCOUNT, 2)
 
-# Detail columns saved per transaction for cross-day matching
-DETAIL_COLS = [
-    'date', 'category', 'phone', 'operator',
-    'product', 'amount', 'supplier_date', 'our_date', 'reason'
-]
+# ============================================================
+# GOOGLE SHEETS
+# ============================================================
+SCOPES = ['https://www.googleapis.com/auth/spreadsheets',
+          'https://www.googleapis.com/auth/drive']
+
+HISTORY_COLS = ['date','operator_tab','sup_cbd','our_eup','diff',
+                'matched_count','sup_only_count','sup_only_cbd',
+                'our_only_count','our_only_eup','real_gap',
+                'pending_count','refunds_eup','net_billed']
+
+DETAIL_COLS = ['date','operator_tab','category','phone','operator',
+               'product','amount','sup_date','our_date','reason','check_instruction','verified']
 
 @st.cache_resource
 def get_gspread_client():
     if not GSPREAD_AVAILABLE:
         return None
     try:
-        creds_dict = dict(st.secrets["gcp_service_account"])
-        creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
+        creds = Credentials.from_service_account_info(
+            dict(st.secrets["gcp_service_account"]), scopes=SCOPES)
         return gspread.authorize(creds)
     except Exception:
         return None
 
 def get_spreadsheet():
     gc = get_gspread_client()
-    if gc is None:
-        return None
+    if gc is None: return None
     try:
-        spreadsheet_id = st.secrets["google_sheets"]["spreadsheet_id"]
-        return gc.open_by_key(spreadsheet_id)
+        return gc.open_by_key(st.secrets["google_sheets"]["spreadsheet_id"])
     except Exception:
         return None
 
 def get_or_create_sheet(sh, title, headers):
-    """Get existing sheet or create new one with headers"""
     try:
-        ws = sh.worksheet(title)
-        return ws
+        return sh.worksheet(title)
     except gspread.WorksheetNotFound:
-        ws = sh.add_worksheet(title=title, rows=1000, cols=len(headers))
+        ws = sh.add_worksheet(title=title, rows=2000, cols=len(headers))
         ws.append_row(headers)
         return ws
-
-def load_history(month=None):
-    """Load history from Google Sheets. If month given (YYYY-MM), load that month's sheet."""
-    sh = get_spreadsheet()
-    if sh is None:
-        return _load_local_history()
-    try:
-        if month:
-            sheet_title = datetime.strptime(month, '%Y-%m').strftime('%B %Y')
-        else:
-            # Load all months
-            all_records = []
-            for ws in sh.worksheets():
-                if _is_month_sheet(ws.title):
-                    try:
-                        records = ws.get_all_records()
-                        all_records.extend(records)
-                    except Exception:
-                        pass
-            return sorted(all_records, key=lambda x: x.get('date', ''))
-
-        ws = get_or_create_sheet(sh, sheet_title, HISTORY_COLS)
-        return ws.get_all_records()
-    except Exception:
-        return _load_local_history()
 
 def _is_month_sheet(title):
     months = ['January','February','March','April','May','June',
               'July','August','September','October','November','December']
     return any(m in title for m in months)
 
+def load_history(month=None, operator_tab=None):
+    sh = get_spreadsheet()
+    if sh is None: return _load_local_history()
+    try:
+        if month:
+            dt = datetime.strptime(month, '%Y-%m')
+            ws = get_or_create_sheet(sh, dt.strftime('%B %Y'), HISTORY_COLS)
+            records = ws.get_all_records()
+        else:
+            records = []
+            for ws in sh.worksheets():
+                if _is_month_sheet(ws.title):
+                    try: records.extend(ws.get_all_records())
+                    except: pass
+            records = sorted(records, key=lambda x: x.get('date',''))
+        if operator_tab:
+            records = [r for r in records if r.get('operator_tab','') == operator_tab]
+        return records
+    except Exception:
+        return _load_local_history()
+
 def save_to_sheets(record):
-    """Save daily summary to the correct month sheet in Google Sheets"""
     sh = get_spreadsheet()
     if sh is None:
         _save_local_history(record)
-        return False, "Google Sheets not connected — saved locally"
+        return False, "Not connected — saved locally"
     try:
-        # Month sheet name e.g. "May 2026"
         dt = datetime.strptime(record['date'], '%Y-%m-%d')
-        sheet_title = dt.strftime('%B %Y')
-        ws = get_or_create_sheet(sh, sheet_title, HISTORY_COLS)
-
-        # Check if date already exists — update if so
+        ws = get_or_create_sheet(sh, dt.strftime('%B %Y'), HISTORY_COLS)
         existing = ws.get_all_records()
         for i, row in enumerate(existing):
-            if row.get('date') == record['date']:
-                row_num = i + 2  # +1 header, +1 1-indexed
-                ws.update(f'A{row_num}', [[record.get(c, '') for c in HISTORY_COLS]])
-                return True, f"Updated existing record for {record['date']} in '{sheet_title}'"
-
-        # Append new row
-        ws.append_row([record.get(c, '') for c in HISTORY_COLS])
-        return True, f"Saved to '{sheet_title}' sheet"
+            if row.get('date') == record['date'] and row.get('operator_tab') == record.get('operator_tab'):
+                ws.update(f'A{i+2}', [[record.get(c,'') for c in HISTORY_COLS]])
+                return True, f"Updated {record['date']} in '{dt.strftime('%B %Y')}'"
+        ws.append_row([record.get(c,'') for c in HISTORY_COLS])
+        return True, f"Saved to '{dt.strftime('%B %Y')}'"
     except Exception as e:
         _save_local_history(record)
-        return False, f"Sheets error: {e} — saved locally"
+        return False, f"Sheets error: {e}"
 
-def save_details_to_sheets(report_date, result):
-    """Save phone-level details for cross-day matching"""
+def save_details_to_sheets(report_date, operator_tab, rows):
     sh = get_spreadsheet()
-    if sh is None:
-        return False, "Not connected"
+    if sh is None: return False, "Not connected"
     try:
         ws = get_or_create_sheet(sh, 'Transaction Details', DETAIL_COLS)
-
-        rows = []
-        # Supplier only
-        for _, r in result['sup_only'].iterrows():
-            rows.append([report_date, 'Supplier Only', r.get('Phone_Display',''),
-                        '', r.get('Package',''), r.get('CBD',0),
-                        r.get('Sup_Date',''), '', r.get('Reason','')])
-        # Our only
-        for _, r in result['our_only'].iterrows():
-            rows.append([report_date, 'Our Only', r.get('Phone_Display',''),
-                        r.get('Operator',''), r.get('Product Name',''),
-                        r.get('End User Price',0), '', r.get('Date & Time',''),
-                        r.get('Reason','')])
-
-        # Always update — remove existing rows for this date then re-add
         all_data = ws.get_all_records()
-        keep = [r for r in all_data if str(r.get('date','')) != str(report_date)]
+        keep = [r for r in all_data
+                if not (str(r.get('date','')) == str(report_date) and
+                        str(r.get('operator_tab','')) == operator_tab)]
         ws.clear()
         ws.append_row(DETAIL_COLS)
         if keep:
             ws.append_rows([[r.get(c,'') for c in DETAIL_COLS] for r in keep])
         if rows:
             ws.append_rows(rows)
-        return True, f"Saved {len(rows)} detail rows for {report_date}"
+        return True, f"Saved {len(rows)} detail rows"
     except Exception as e:
-        return False, f"Details save error: {e}"
+        return False, f"Details error: {e}"
 
-def cross_day_match(result, report_date):
-    """Find phones from 'Our Only' today that were 'Supplier Only' yesterday, or vice versa"""
+def load_pending_verifications():
     sh = get_spreadsheet()
-    if sh is None:
-        return [], []
+    if sh is None: return []
+    try:
+        ws = get_or_create_sheet(sh, 'Transaction Details', DETAIL_COLS)
+        records = ws.get_all_records()
+        return [r for r in records if str(r.get('verified','')).startswith('⬜')]
+    except: return []
+
+def load_verified():
+    sh = get_spreadsheet()
+    if sh is None: return []
+    try:
+        ws = get_or_create_sheet(sh, 'Transaction Details', DETAIL_COLS)
+        records = ws.get_all_records()
+        return [r for r in records if not str(r.get('verified','')).startswith('⬜')]
+    except: return []
+
+def update_verification(sh, phone, date_val, operator_tab, new_status):
+    try:
+        ws = sh.worksheet('Transaction Details')
+        records = ws.get_all_records()
+        for i, r in enumerate(records):
+            if (str(r.get('phone','')) == str(phone) and
+                str(r.get('date','')) == str(date_val) and
+                str(r.get('operator_tab','')) == operator_tab):
+                col = DETAIL_COLS.index('verified') + 1
+                ws.update_cell(i+2, col, new_status)
+                return True
+    except: pass
+    return False
+
+def cross_day_match(result, report_date, operator_tab):
+    sh = get_spreadsheet()
+    if sh is None: return [], []
     try:
         ws = sh.worksheet('Transaction Details')
         all_details = ws.get_all_records()
         df = pd.DataFrame(all_details)
-        if df.empty:
-            return [], []
-
-        # Yesterday's supplier only phones
+        if df.empty: return [], []
+        df = df[df['operator_tab'] == operator_tab]
         dt = datetime.strptime(report_date, '%Y-%m-%d')
         yesterday = (dt - timedelta(days=1)).strftime('%Y-%m-%d')
+        yest_sup = set(df[(df['date']==yesterday) & (df['category']=='Supplier Only')]['phone'])
+        yest_our = set(df[(df['date']==yesterday) & (df['category']=='Our Only')]['phone'])
+        our_only  = set(result['our_only']['Phone_Display']) if len(result['our_only']) > 0 else set()
+        sup_only  = set(result['sup_only']['Phone_Display']) if len(result['sup_only']) > 0 else set()
+        return list(our_only & yest_sup), list(sup_only & yest_our)
+    except: return [], []
 
-        yest_sup_only = set(df[(df['date']==yesterday) & (df['category']=='Supplier Only')]['phone'])
-
-        our_only_phones = set(result['our_only']['Phone_Display']) if len(result['our_only']) > 0 else set()
-        sup_only_phones = set(result['sup_only']['Phone_Display']) if len(result['sup_only']) > 0 else set()
-
-        # Our Only today that appeared as Supplier Only yesterday = date shift confirmed
-        confirmed_shifts_our  = list(our_only_phones & yest_sup_only)
-        # Supplier Only today that appeared as Our Only yesterday = date shift confirmed
-        confirmed_shifts_sup  = list(sup_only_phones & set(
-            df[(df['date']==yesterday) & (df['category']=='Our Only')]['phone']
-        ))
-
-        return confirmed_shifts_our, confirmed_shifts_sup
-    except Exception:
-        return [], []
-
-# ---- Local fallback (when Sheets not available) ----
+# Local fallback
 HISTORY_FILE = os.path.join(os.path.dirname(__file__), "history.json")
-
 def _load_local_history():
     if os.path.exists(HISTORY_FILE):
-        with open(HISTORY_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
+        with open(HISTORY_FILE,'r',encoding='utf-8') as f: return json.load(f)
     return []
-
 def _save_local_history(record):
-    history = _load_local_history()
-    history = [h for h in history if h.get('date') != record.get('date')]
-    history.append(record)
-    history.sort(key=lambda x: x.get('date', ''))
-    with open(HISTORY_FILE, 'w', encoding='utf-8') as f:
-        json.dump(history, f, ensure_ascii=False, indent=2)
-
-def add_to_history(record):
-    """Legacy wrapper — now saves to Sheets"""
-    save_to_sheets(record)
+    h = _load_local_history()
+    h = [x for x in h if not (x.get('date')==record.get('date') and x.get('operator_tab')==record.get('operator_tab'))]
+    h.append(record); h.sort(key=lambda x: x.get('date',''))
+    with open(HISTORY_FILE,'w',encoding='utf-8') as f: json.dump(h,f,ensure_ascii=False,indent=2)
 
 # ============================================================
 # PHONE NORMALIZATION
 # ============================================================
 def norm_phone(phone):
-    if phone is None or (isinstance(phone, float) and np.isnan(phone)):
-        return ''
-    s = str(phone).strip().replace('.0', '').replace(' ', '').replace('+', '')
+    if phone is None or (isinstance(phone, float) and np.isnan(phone)): return ''
+    s = str(phone).strip().replace('.0','').replace(' ','').replace('+','')
     if 'E' in s.upper():
-        try:
-            s = str(int(float(s)))
-        except:
-            pass
-    s = s.replace('.0', '')
-    if s.startswith('00972'):
-        s = s[5:]
-    elif s.startswith('972'):
-        s = s[3:]
-    if s.startswith('0'):
-        s = s[1:]
+        try: s = str(int(float(s)))
+        except: pass
+    s = s.replace('.0','')
+    if s.startswith('00972'): s = s[5:]
+    elif s.startswith('972'): s = s[3:]
+    if s.startswith('0'): s = s[1:]
     return s.strip()
 
 def display_phone(norm):
-    """Convert normalized phone back to 05X display format"""
-    if norm and len(norm) >= 8:
-        return '0' + norm
+    if norm and len(norm) >= 8: return '0' + norm
     return norm
 
 # ============================================================
-# LOAD FILES
+# LOAD OUR FILES (standard format — all operators)
 # ============================================================
-def load_supplier(file_bytes, filename):
+def load_our(file_bytes, operator_name):
+    try:
+        for enc in ['utf-8-sig','utf-8','windows-1255','cp1255','latin1']:
+            try: text = file_bytes.decode(enc); break
+            except: continue
+        df = pd.read_csv(StringIO(text), dtype={'Phone Number': str}, on_bad_lines='skip')
+        df['Operator'] = operator_name
+        df['End User Price'] = pd.to_numeric(df.get('End User Price',0), errors='coerce').fillna(0)
+        df['Customer price'] = pd.to_numeric(df.get('Customer price',0), errors='coerce').fillna(0)
+        df = df[~df['Action'].isin(['REWARD','REFUND_REWARD'])]
+        df['Is_Refund'] = df['Action'] == 'REFUND'
+        df['Eff_Status'] = df.apply(
+            lambda r: 'CANCELLED' if r['Action']=='REFUND' else r['Status'], axis=1)
+        df['phone_norm'] = df['Phone Number'].apply(norm_phone)
+        df['Phone_Display'] = df['phone_norm'].apply(display_phone)
+        try:
+            df['_dt'] = pd.to_datetime(df['Date & Time'], dayfirst=True, errors='coerce')
+            df['Is_Late'] = df['_dt'].dt.hour >= 22
+        except: df['Is_Late'] = False
+        df = df[df['phone_norm'].str.len() >= 7]
+        return df, None
+    except Exception as e: return None, str(e)
+
+# ============================================================
+# LOAD SUPPLIER FILES
+# ============================================================
+def load_supplier_partner(file_bytes, filename):
+    """Partner/012Talk supplier XLS"""
     try:
         if filename.lower().endswith('.xls'):
             text = file_bytes.decode('cp1255', errors='replace')
         else:
-            for enc in ['utf-8-sig', 'windows-1255', 'cp1255', 'latin1']:
-                try:
-                    text = file_bytes.decode(enc)
-                    break
-                except:
-                    continue
-
-        lines = text.replace('\r\n', '\n').replace('\r', '\n').strip().split('\n')
-        start = 0
-        first_line_cols = [c for c in lines[0].split('\t') if c.strip()]
-        if len(first_line_cols) == 1:
-            start = 1
-
+            for enc in ['utf-8-sig','windows-1255','cp1255','latin1']:
+                try: text = file_bytes.decode(enc); break
+                except: continue
+        lines = text.replace('\r\n','\n').replace('\r','\n').strip().split('\n')
+        start = 1 if len([c for c in lines[0].split('\t') if c.strip()]) == 1 else 0
         sep = '\t' if lines[start].count('\t') > lines[start].count(',') else ','
         df = pd.read_csv(StringIO('\n'.join(lines[start:])), sep=sep,
                          dtype={'MSISDN': str}, on_bad_lines='skip')
-
         col_map = {
-            'שם לקוח': 'Cust_Name', 'מספר לקוח': 'Cust_Num',
-            'מס טרנזקציה': 'Sup_TxID', 'תאריך ושעת טעינה': 'Sup_Date',
-            'MSISDN': 'MSISDN', 'חיוב לפני הנחה כולל מעמ': 'CBD',
-            'נטו כולל מעמ': 'Net_Total', 'שם כרטיס': 'Package',
-            'סוג כרטיס': 'Card_Type', 'אחוז הנחה': 'Discount_Pct',
-            'סכום הנחה כולל מעמ': 'Discount_Amt'
+            'שם לקוח':'Cust_Name','מספר לקוח':'Cust_Num',
+            'מס טרנזקציה':'Sup_TxID','תאריך ושעת טעינה':'Sup_Date',
+            'MSISDN':'MSISDN','חיוב לפני הנחה כולל מעמ':'CBD',
+            'נטו כולל מעמ':'Net_Total','שם כרטיס':'Package',
+            'סוג כרטיס':'Card_Type','אחוז הנחה':'Discount_Pct',
+            'סכום הנחה כולל מעמ':'Discount_Amt'
         }
         df.rename(columns=col_map, inplace=True)
-        df['CBD'] = pd.to_numeric(df.get('CBD', 0), errors='coerce').fillna(0)
-        df['Net_Total'] = pd.to_numeric(df.get('Net_Total', 0), errors='coerce').fillna(0)
+        df['CBD'] = pd.to_numeric(df.get('CBD',0), errors='coerce').fillna(0)
+        df['Net_Total'] = pd.to_numeric(df.get('Net_Total',0), errors='coerce').fillna(0)
         df['phone_norm'] = df['MSISDN'].apply(norm_phone)
         df['Phone_Display'] = df['phone_norm'].apply(display_phone)
         df = df[df['phone_norm'].str.len() >= 8]
         return df, None
-    except Exception as e:
-        return None, str(e)
+    except Exception as e: return None, str(e)
 
-def load_our(file_bytes, operator_name):
+def load_supplier_cellcom(file_bytes):
+    """Cellcom supplier XLSX"""
     try:
-        for enc in ['utf-8-sig', 'utf-8', 'windows-1255', 'cp1255', 'latin1']:
-            try:
-                text = file_bytes.decode(enc)
-                break
-            except:
-                continue
-
-        df = pd.read_csv(StringIO(text), dtype={'Phone Number': str}, on_bad_lines='skip')
-        df['Operator'] = operator_name
-        df['End User Price'] = pd.to_numeric(df.get('End User Price', 0), errors='coerce').fillna(0)
-        df['Customer price'] = pd.to_numeric(df.get('Customer price', 0), errors='coerce').fillna(0)
-
-        df = df[~df['Action'].isin(['REWARD', 'REFUND_REWARD'])]
-
-        df['Is_Refund'] = df['Action'] == 'REFUND'
-        df['Eff_Status'] = df.apply(
-            lambda r: 'CANCELLED' if r['Action'] == 'REFUND' else r['Status'], axis=1)
-        df['phone_norm'] = df['Phone Number'].apply(norm_phone)
+        df = pd.read_excel(BytesIO(file_bytes))
+        col_map = {
+            'שם משווק':'Dealer_Name',
+            'תאריך טעינה':'Sup_Date',
+            'סכום הטענה':'CBD',
+            'סכום ביטול':'Cancel_Amt',
+            'קוד כרטיס':'Card_Code',
+            'טרמינל':'Terminal',
+            'מספר מנוי':'MSISDN',
+            'BAN':'BAN'
+        }
+        df.rename(columns=col_map, inplace=True)
+        df['CBD'] = pd.to_numeric(df.get('CBD',0), errors='coerce').fillna(0)
+        df['Cancel_Amt'] = pd.to_numeric(df.get('Cancel_Amt',0), errors='coerce').fillna(0)
+        df['Is_Cancel'] = df['Cancel_Amt'].notna() & (df['Cancel_Amt'] > 0)
+        df['phone_norm'] = df['MSISDN'].apply(norm_phone)
         df['Phone_Display'] = df['phone_norm'].apply(display_phone)
-
-        # Detect late transactions (after 22:00 — likely date shift)
-        try:
-            df['_dt'] = pd.to_datetime(df['Date & Time'], dayfirst=True, errors='coerce')
-            df['Is_Late'] = df['_dt'].dt.hour >= 22
-        except:
-            df['Is_Late'] = False
-
-        df = df[df['phone_norm'].str.len() >= 7]
+        df['Sup_Date'] = pd.to_datetime(df['Sup_Date'], errors='coerce')
+        df = df[df['phone_norm'].str.len() >= 8]
         return df, None
-    except Exception as e:
-        return None, str(e)
+    except Exception as e: return None, str(e)
+
+def load_supplier_pelephone(file_bytes):
+    """Pelephone supplier XLSX"""
+    try:
+        df = pd.read_excel(BytesIO(file_bytes))
+        # Column F = Unnamed: 5 = TOPUP_PRICE (price we pay)
+        df.rename(columns={
+            'Serial_Number':'Serial',
+            "#DOC_NUMBER'":'Doc_Number',
+            'Order_Number':'Order_Number',
+            'TOPUP_TIME':'Sup_Time',
+            'TOPUP_DATE':'Sup_Date',
+            'Unnamed: 5':'TOPUP_PRICE',
+            'dealer_price':'Dealer_Price',
+            'TOPUP_ITEM':'TOPUP_ITEM',
+            'Dealer':'Dealer',
+            'SUBSCRIBER':'MSISDN'
+        }, inplace=True)
+        df['TOPUP_PRICE'] = pd.to_numeric(df.get('TOPUP_PRICE',0), errors='coerce').fillna(0)
+        df['phone_norm'] = df['MSISDN'].apply(norm_phone)
+        df['Phone_Display'] = df['phone_norm'].apply(display_phone)
+        df['Order_Number'] = df['Order_Number'].astype(str).str.strip()
+        # Combine date+time
+        try:
+            df['Sup_DateTime'] = pd.to_datetime(
+                df['Sup_Date'].astype(str) + ' ' + df['Sup_Time'].astype(str),
+                dayfirst=True, errors='coerce')
+        except: df['Sup_DateTime'] = pd.NaT
+        df = df[df['phone_norm'].str.len() >= 8]
+        return df, None
+    except Exception as e: return None, str(e)
 
 # ============================================================
-# RECONCILIATION LOGIC
+# CHECK INSTRUCTIONS (smart reason column)
 # ============================================================
-def run_reconciliation(sup_df, partner_df, talk_df):
+def make_check_instruction(category, sup_date, our_date, report_date, is_late=False):
+    rd = str(report_date)
+    if category == 'Supplier Only':
+        try:
+            sd = pd.to_datetime(sup_date, dayfirst=True)
+            sd_str = sd.strftime('%d-%b-%Y')
+            if sd.strftime('%Y-%m-%d') != rd:
+                return f"Check OUR reports for {sd_str} — verify this phone appears there. If yes → date shift, not a real gap."
+            else:
+                return "Transaction date matches report date. Check if it was processed in our system."
+        except:
+            return "Check our system for this transaction date."
+    elif category == 'Our Only':
+        try:
+            dt = pd.to_datetime(our_date, dayfirst=True)
+            next_day = (dt + timedelta(days=1)).strftime('%d-%b-%Y')
+            if is_late:
+                return f"Late transaction ({dt.strftime('%H:%M')}). Check SUPPLIER report for {next_day} — likely appears there."
+            else:
+                return f"Check SUPPLIER report for {next_day} — may have been processed next day."
+        except:
+            return "Check supplier report for next day."
+    return ""
+
+# ============================================================
+# RECONCILIATION — PARTNER + 012TALK
+# ============================================================
+def run_recon_partner(sup_df, partner_df, talk_df, report_date):
     our_all = pd.concat([partner_df, talk_df], ignore_index=True)
-
-    our_dc      = our_all[(our_all['Eff_Status'].isin(['DONE', 'CANCELLED'])) & (~our_all['Is_Refund'])].copy()
+    our_dc      = our_all[(our_all['Eff_Status'].isin(['DONE','CANCELLED'])) & (~our_all['Is_Refund'])].copy()
     our_pending = our_all[our_all['Eff_Status'] == 'PENDING_CANCELLATION'].copy()
     our_refunds = our_all[our_all['Is_Refund']].copy()
     our_failed  = our_all[our_all['Eff_Status'] == 'FAILED'].copy()
 
-    sup_phones     = set(sup_df['phone_norm'])
-    our_dc_phones  = set(our_dc['phone_norm'])
-    our_pnd_phones = set(our_pending['phone_norm'])
+    sup_phones    = set(sup_df['phone_norm'])
+    our_dc_phones = set(our_dc['phone_norm'])
+    our_pnd_phones= set(our_pending['phone_norm'])
 
     matched_phones  = sup_phones & our_dc_phones
     sup_only_phones = sup_phones - our_dc_phones - our_pnd_phones
-    sup_pending_phones = sup_phones & our_pnd_phones   # supplier has it, we have PENDING
+    sup_pnd_phones  = sup_phones & our_pnd_phones
     our_only_phones = our_dc_phones - sup_phones
 
-    # ---- MATCHED detail ----
     matched_rows = []
     used_our = set()
-    for _, sup_row in sup_df[sup_df['phone_norm'].isin(matched_phones)].iterrows():
-        our_match = our_dc[
-            (our_dc['phone_norm'] == sup_row['phone_norm']) &
-            (~our_dc['Transaction ID'].isin(used_our))
-        ]
-        if len(our_match) > 0:
-            our_row = our_match.iloc[0]
-            used_our.add(our_row['Transaction ID'])
-            diff = sup_row['CBD'] - our_row['End User Price']
+    for _, sr in sup_df[sup_df['phone_norm'].isin(matched_phones)].iterrows():
+        om = our_dc[(our_dc['phone_norm']==sr['phone_norm']) & (~our_dc['Transaction ID'].isin(used_our))]
+        if len(om) > 0:
+            or_ = om.iloc[0]
+            used_our.add(or_['Transaction ID'])
             matched_rows.append({
-                'Phone':              our_row['Phone_Display'],
-                'Supplier Date':      sup_row.get('Sup_Date', ''),
-                'Supplier Package':   sup_row.get('Package', ''),
-                'Supplier Tx ID':     sup_row.get('Sup_TxID', ''),
-                'Supplier CBD (NIS)': sup_row['CBD'],
-                'Our Tx ID':          our_row['Transaction ID'],
-                'Our Date':           our_row['Date & Time'],
-                'Our Operator':       our_row['Operator'],
-                'Our Status':         our_row['Eff_Status'],
-                'Our Product':        our_row['Product Name'],
-                'Our EUP (NIS)':      our_row['End User Price'],
-                'Difference (NIS)':   diff,
+                'Phone': or_['Phone_Display'],
+                'Supplier Date': sr.get('Sup_Date',''),
+                'Supplier Package': sr.get('Package',''),
+                'Supplier Tx ID': sr.get('Sup_TxID',''),
+                'Supplier CBD (NIS)': sr['CBD'],
+                'Our Tx ID': or_['Transaction ID'],
+                'Our Date': or_['Date & Time'],
+                'Our Operator': or_['Operator'],
+                'Our Status': or_['Eff_Status'],
+                'Our Product': or_['Product Name'],
+                'Our EUP (NIS)': or_['End User Price'],
+                'Difference (NIS)': sr['CBD'] - or_['End User Price'],
+            })
+
+    matched_df = pd.DataFrame(matched_rows)
+    sup_only_df = sup_df[sup_df['phone_norm'].isin(sup_only_phones)].copy()
+    sup_only_df['Reason'] = 'Not found in our system'
+    sup_only_df['Check_Instruction'] = sup_only_df.apply(
+        lambda r: make_check_instruction('Supplier Only', r.get('Sup_Date',''), '', report_date), axis=1)
+
+    sup_pnd_df = sup_df[sup_df['phone_norm'].isin(sup_pnd_phones)].copy()
+    our_only_df = our_dc[our_dc['phone_norm'].isin(our_only_phones)].copy()
+    our_only_df['Reason'] = our_only_df.apply(
+        lambda r: 'Late transaction (after 22:00)' if r.get('Is_Late', False) else 'Not found at supplier', axis=1)
+    our_only_df['Check_Instruction'] = our_only_df.apply(
+        lambda r: make_check_instruction('Our Only', '', r.get('Date & Time',''), report_date, r.get('Is_Late',False)), axis=1)
+
+    t = {
+        'sup_cbd': matched_df['Supplier CBD (NIS)'].sum() if len(matched_df) else 0,
+        'our_eup': matched_df['Our EUP (NIS)'].sum() if len(matched_df) else 0,
+        'diff': matched_df['Difference (NIS)'].sum() if len(matched_df) else 0,
+        'sup_only_cbd': sup_only_df['CBD'].sum() if len(sup_only_df) else 0,
+        'sup_pnd_cbd': sup_pnd_df['CBD'].sum() if len(sup_pnd_df) else 0,
+        'our_only_eup': our_only_df['End User Price'].sum() if len(our_only_df) else 0,
+        'pending_eup': our_pending['End User Price'].sum() if len(our_pending) else 0,
+        'refunds_eup': our_refunds['End User Price'].sum() if len(our_refunds) else 0,
+        'partner_eup': partner_df[partner_df['Eff_Status'].isin(['DONE','CANCELLED']) & ~partner_df['Is_Refund']]['End User Price'].sum(),
+        'talk012_eup': talk_df[talk_df['Eff_Status'].isin(['DONE','CANCELLED']) & ~talk_df['Is_Refund']]['End User Price'].sum(),
+        'partner_ref': partner_df[partner_df['Is_Refund']]['End User Price'].sum(),
+        'talk012_ref': talk_df[talk_df['Is_Refund']]['End User Price'].sum(),
+        'matched_count': len(matched_phones),
+        'sup_only_count': len(sup_only_phones),
+        'sup_pnd_count': len(sup_pnd_phones),
+        'our_only_count': len(our_only_phones),
+        'pending_count': len(our_pending),
+        'refunds_count': len(our_refunds),
+        'failed_count': len(our_failed),
+    }
+    t['real_gap'] = round(t['sup_only_cbd'] - t['our_only_eup'], 2)
+
+    return {'matched': matched_df, 'sup_only': sup_only_df, 'sup_pending': sup_pnd_df,
+            'our_only': our_only_df, 'pending': our_pending, 'refunds': our_refunds,
+            'failed': our_failed, 'totals': t}
+
+# ============================================================
+# RECONCILIATION — CELLCOM
+# ============================================================
+def run_recon_cellcom(sup_df, our_df, report_date):
+    our_dc      = our_df[(our_df['Eff_Status'].isin(['DONE','CANCELLED'])) & (~our_df['Is_Refund'])].copy()
+    our_refunds = our_df[our_df['Is_Refund']].copy()
+    our_failed  = our_df[our_df['Eff_Status'] == 'FAILED'].copy()
+    our_pending = our_df[our_df['Eff_Status'] == 'PENDING'].copy()
+
+    sup_phones    = set(sup_df['phone_norm'])
+    our_dc_phones = set(our_dc['phone_norm'])
+
+    matched_phones  = sup_phones & our_dc_phones
+    sup_only_phones = sup_phones - our_dc_phones
+    our_only_phones = our_dc_phones - sup_phones
+
+    matched_rows = []
+    used_our = set()
+    price_diffs = []
+    for _, sr in sup_df[sup_df['phone_norm'].isin(matched_phones)].iterrows():
+        om = our_dc[(our_dc['phone_norm']==sr['phone_norm']) & (~our_dc['Transaction ID'].isin(used_our))]
+        if len(om) > 0:
+            or_ = om.iloc[0]
+            used_our.add(or_['Transaction ID'])
+            our_eup = or_['End User Price']
+            expected_sup = cellcom_expected_supplier_price(our_eup)
+            actual_sup   = sr['CBD']
+            price_diff   = round(actual_sup - expected_sup, 2)
+            price_diffs.append(price_diff)
+            matched_rows.append({
+                'Phone': or_['Phone_Display'],
+                'Supplier Date': str(sr.get('Sup_Date','')),
+                'Supplier CBD (NIS)': actual_sup,
+                'Expected Supplier Price': expected_sup,
+                'Price Diff (NIS)': price_diff,
+                'Our Tx ID': or_['Transaction ID'],
+                'Our Date': or_['Date & Time'],
+                'Our Product': or_['Product Name'],
+                'Our EUP (NIS)': our_eup,
             })
 
     matched_df = pd.DataFrame(matched_rows)
 
-    # ---- SUPPLIER ONLY detail ----
+    # Cellcom price analysis
+    total_expected_diff = sum(
+        cellcom_expected_supplier_price(r['Our EUP (NIS)']) - r['Our EUP (NIS)']
+        for _, r in matched_df.iterrows()
+    ) if len(matched_df) else 0
+    actual_total_diff = matched_df['Price Diff (NIS)'].sum() if len(matched_df) else 0
+    unexplained_diff = round(actual_total_diff - total_expected_diff, 2)
+    anomaly_rows = matched_df[matched_df['Price Diff (NIS)'].abs() > 0.01] if len(matched_df) else pd.DataFrame()
+
     sup_only_df = sup_df[sup_df['phone_norm'].isin(sup_only_phones)].copy()
     sup_only_df['Reason'] = 'Not found in our system'
+    sup_only_df['Check_Instruction'] = sup_only_df.apply(
+        lambda r: make_check_instruction('Supplier Only', str(r.get('Sup_Date','')), '', report_date), axis=1)
 
-    # ---- SUPPLIER vs PENDING ----
-    sup_pending_df = sup_df[sup_df['phone_norm'].isin(sup_pending_phones)].copy()
-
-    # ---- OUR ONLY detail ----
     our_only_df = our_dc[our_dc['phone_norm'].isin(our_only_phones)].copy()
     our_only_df['Reason'] = our_only_df.apply(
-        lambda r: 'Late transaction (after 22:00)' if r.get('Is_Late', False) else 'Not found at supplier',
-        axis=1
-    )
+        lambda r: 'Late transaction (after 22:00)' if r.get('Is_Late',False) else 'Not found at supplier', axis=1)
+    our_only_df['Check_Instruction'] = our_only_df.apply(
+        lambda r: make_check_instruction('Our Only','',r.get('Date & Time',''), report_date, r.get('Is_Late',False)), axis=1)
 
-    # ---- TOTALS ----
-    totals = {
-        'sup_cbd':         matched_df['Supplier CBD (NIS)'].sum() if len(matched_df) else 0,
-        'our_eup':         matched_df['Our EUP (NIS)'].sum() if len(matched_df) else 0,
-        'diff':            matched_df['Difference (NIS)'].sum() if len(matched_df) else 0,
-        'sup_only_cbd':    sup_only_df['CBD'].sum() if len(sup_only_df) else 0,
-        'sup_pending_cbd': sup_pending_df['CBD'].sum() if len(sup_pending_df) else 0,
-        'our_only_eup':    our_only_df['End User Price'].sum() if len(our_only_df) else 0,
-        'pending_eup':     our_pending['End User Price'].sum() if len(our_pending) else 0,
-        'refunds_eup':     our_refunds['End User Price'].sum() if len(our_refunds) else 0,
-        'partner_eup':     partner_df[partner_df['Eff_Status'].isin(['DONE', 'CANCELLED']) & ~partner_df['Is_Refund']]['End User Price'].sum(),
-        'talk012_eup':     talk_df[talk_df['Eff_Status'].isin(['DONE', 'CANCELLED']) & ~talk_df['Is_Refund']]['End User Price'].sum(),
-        'partner_ref':     partner_df[partner_df['Is_Refund']]['End User Price'].sum(),
-        'talk012_ref':     talk_df[talk_df['Is_Refund']]['End User Price'].sum(),
-        'matched_count':        len(matched_phones),
-        'sup_only_count':       len(sup_only_phones),
-        'sup_pending_count':    len(sup_pending_phones),
-        'our_only_count':       len(our_only_phones),
-        'pending_count':        len(our_pending),
-        'refunds_count':        len(our_refunds),
-        'failed_count':         len(our_failed),
+    t = {
+        'sup_cbd': sup_df[sup_df['phone_norm'].isin(matched_phones)]['CBD'].sum(),
+        'our_eup': our_dc[our_dc['phone_norm'].isin(matched_phones)]['End User Price'].sum(),
+        'sup_only_cbd': sup_only_df['CBD'].sum() if len(sup_only_df) else 0,
+        'our_only_eup': our_only_df['End User Price'].sum() if len(our_only_df) else 0,
+        'refunds_eup': our_refunds['End User Price'].sum() if len(our_refunds) else 0,
+        'pending_eup': our_pending['End User Price'].sum() if len(our_pending) else 0,
+        'matched_count': len(matched_phones),
+        'sup_only_count': len(sup_only_phones),
+        'our_only_count': len(our_only_phones),
+        'refunds_count': len(our_refunds),
+        'failed_count': len(our_failed),
+        'pending_count': len(our_pending),
+        'price_anomaly_count': len(anomaly_rows),
+        'unexplained_diff': unexplained_diff,
+        'total_expected_discount': round(abs(total_expected_diff), 2),
     }
-    # Real gap: supplier charges for phones we don't see vs we charged for phones supplier doesn't see
-    totals['real_gap'] = round(totals['sup_only_cbd'] - totals['our_only_eup'], 2)
+    t['real_gap'] = round(t['sup_only_cbd'] - t['our_only_eup'], 2)
 
-    return {
-        'matched':      matched_df,
-        'sup_only':     sup_only_df,
-        'sup_pending':  sup_pending_df,
-        'our_only':     our_only_df,
-        'pending':      our_pending,
-        'refunds':      our_refunds,
-        'failed':       our_failed,
-        'totals':       totals,
-    }
+    return {'matched': matched_df, 'sup_only': sup_only_df, 'our_only': our_only_df,
+            'refunds': our_refunds, 'failed': our_failed, 'pending': our_pending,
+            'anomalies': anomaly_rows, 'totals': t}
 
 # ============================================================
-# EXCEL EXPORT
+# RECONCILIATION — PELEPHONE
 # ============================================================
-def create_excel_report(result, report_date):
+def run_recon_pelephone(sup_df, pele_df, global_df, esim_df, report_date):
+    our_all = pd.concat([pele_df, global_df, esim_df], ignore_index=True)
+    our_dc      = our_all[(our_all['Eff_Status'].isin(['DONE','CANCELLED'])) & (~our_all['Is_Refund'])].copy()
+    our_refunds = our_all[our_all['Is_Refund']].copy()
+    our_failed  = our_all[our_all['Eff_Status'] == 'FAILED'].copy()
+
+    # Match by Order_Number = Transaction ID (primary)
+    sup_order_ids = set(sup_df['Order_Number'].astype(str).str.strip())
+    our_dc['tx_clean'] = our_dc['Transaction ID'].astype(str).str.strip()
+    our_tx_ids = set(our_dc['tx_clean'])
+
+    matched_ids  = sup_order_ids & our_tx_ids
+    sup_only_ids = sup_order_ids - our_tx_ids
+    our_only_ids = our_tx_ids - sup_order_ids
+
+    matched_rows = []
+    for _, sr in sup_df[sup_df['Order_Number'].astype(str).str.strip().isin(matched_ids)].iterrows():
+        om = our_dc[our_dc['tx_clean'] == sr['Order_Number'].strip()]
+        if len(om) > 0:
+            or_ = om.iloc[0]
+            sup_price = sr['TOPUP_PRICE']
+            our_eup   = or_['End User Price']
+            diff = round(sup_price - our_eup, 2)
+            is_esim = str(or_.get('Operator','')) == 'eSIM'
+            matched_rows.append({
+                'Phone': or_['Phone_Display'],
+                'Supplier Date': f"{sr.get('Sup_Date','')} {sr.get('Sup_Time','')}",
+                'Supplier Tx (Doc)': sr.get('Doc_Number',''),
+                'Order Number': sr['Order_Number'],
+                'Supplier Price (NIS)': sup_price,
+                'Our Tx ID': or_['Transaction ID'],
+                'Our Date': or_['Date & Time'],
+                'Our Operator': or_['Operator'],
+                'Our Product': or_['Product Name'],
+                'Our EUP (NIS)': our_eup,
+                'Difference (NIS)': diff,
+                'Note': 'eSIM: expected +2.67 diff' if is_esim and abs(diff - 2.67) < 0.5 else (
+                    '⚠️ Unexpected diff' if abs(diff) > 0.01 and not (is_esim and abs(diff-2.67)<0.5) else ''),
+            })
+
+    matched_df = pd.DataFrame(matched_rows)
+    sup_only_df = sup_df[sup_df['Order_Number'].astype(str).str.strip().isin(sup_only_ids)].copy()
+    sup_only_df['Reason'] = 'Order not found in our system'
+    sup_only_df['Check_Instruction'] = sup_only_df.apply(
+        lambda r: make_check_instruction('Supplier Only',
+            f"{r.get('Sup_Date','')} {r.get('Sup_Time','')}", '', report_date), axis=1)
+
+    our_only_df = our_dc[our_dc['tx_clean'].isin(our_only_ids)].copy()
+    our_only_df['Reason'] = our_only_df.apply(
+        lambda r: 'Late transaction (after 22:00)' if r.get('Is_Late',False) else 'Order not in supplier report', axis=1)
+    our_only_df['Check_Instruction'] = our_only_df.apply(
+        lambda r: make_check_instruction('Our Only','',r.get('Date & Time',''),report_date,r.get('Is_Late',False)), axis=1)
+
+    esim_diffs = matched_df[matched_df['Note'].str.contains('eSIM', na=False)]
+    unexpected = matched_df[matched_df['Note'].str.contains('Unexpected', na=False)]
+
+    t = {
+        'sup_price': matched_df['Supplier Price (NIS)'].sum() if len(matched_df) else 0,
+        'our_eup': matched_df['Our EUP (NIS)'].sum() if len(matched_df) else 0,
+        'diff': matched_df['Difference (NIS)'].sum() if len(matched_df) else 0,
+        'sup_only_price': sup_only_df['TOPUP_PRICE'].sum() if len(sup_only_df) else 0,
+        'our_only_eup': our_only_df['End User Price'].sum() if len(our_only_df) else 0,
+        'refunds_eup': our_refunds['End User Price'].sum() if len(our_refunds) else 0,
+        'matched_count': len(matched_ids),
+        'sup_only_count': len(sup_only_ids),
+        'our_only_count': len(our_only_ids),
+        'refunds_count': len(our_refunds),
+        'failed_count': len(our_failed),
+        'esim_diff_count': len(esim_diffs),
+        'esim_diff_total': round(esim_diffs['Difference (NIS)'].sum(), 2) if len(esim_diffs) else 0,
+        'unexpected_diff_count': len(unexpected),
+    }
+    t['real_gap'] = round(t['sup_only_price'] - t['our_only_eup'], 2)
+
+    return {'matched': matched_df, 'sup_only': sup_only_df, 'our_only': our_only_df,
+            'refunds': our_refunds, 'failed': our_failed, 'totals': t}
+
+# ============================================================
+# SHARED UI COMPONENTS
+# ============================================================
+def render_header(title, subtitle, logos):
+    logo_html = ''.join([f'<img src="{l}" style="height:32px;object-fit:contain;">' for l in logos if l])
+    st.markdown(f"""
+    <div class="main-header">
+        <div style="flex:1">
+            <div style="display:flex;align-items:center;gap:12px;margin-bottom:6px;">
+                {logo_html}
+            </div>
+            <h1>{title}</h1>
+            <p>{subtitle}</p>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+def render_action_required(sup_only_df, our_only_df, report_date, shifts_our=None, shifts_sup=None):
+    """Show the Action Required block with all phones needing verification"""
+    sup_count = len(sup_only_df)
+    our_count = len(our_only_df)
+    total = sup_count + our_count
+    if total == 0:
+        st.success("✅ No verification needed — all transactions matched!")
+        return
+
+    st.markdown(f"""
+    <div class="action-box">
+        <h4>⚠️ Action Required: {total} phone(s) need verification</h4>
+    </div>
+    """, unsafe_allow_html=True)
+
+    rows = []
+    if len(sup_only_df) > 0:
+        for _, r in sup_only_df.iterrows():
+            phone = r.get('Phone_Display', r.get('phone_norm',''))
+            date_val = str(r.get('Sup_Date', r.get('sup_date','')))
+            product = r.get('Package', r.get('TOPUP_ITEM', r.get('Product Name','')))
+            amount = r.get('CBD', r.get('TOPUP_PRICE', 0))
+            instruction = r.get('Check_Instruction','Check our reports for this date')
+            note = ''
+            if shifts_sup and phone in (shifts_sup or []):
+                note = '✅ Date shift confirmed (found in yesterday our-only)'
+            rows.append({
+                'Phone': phone, 'Date': date_val, 'Product': product,
+                'Amount (NIS)': amount, 'Where': '❌ In supplier — not in ours',
+                'What to check': instruction, 'Auto-check': note,
+                'Verified': '⬜ Not checked'
+            })
+    if len(our_only_df) > 0:
+        for _, r in our_only_df.iterrows():
+            phone = r.get('Phone_Display','')
+            date_val = r.get('Date & Time','')
+            product = r.get('Product Name','')
+            amount = r.get('End User Price',0)
+            instruction = r.get('Check_Instruction','Check supplier report for next day')
+            note = ''
+            if shifts_our and phone in shifts_our:
+                note = '✅ Date shift confirmed (found in yesterday supplier-only)'
+            rows.append({
+                'Phone': phone, 'Date': date_val, 'Product': product,
+                'Amount (NIS)': amount, 'Where': '⚠️ In ours — not in supplier',
+                'What to check': instruction, 'Auto-check': note,
+                'Verified': '⬜ Not checked'
+            })
+    if rows:
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+def render_summary_tab(sup_only_df, our_only_df, t, report_date, tab_name):
+    """Combined summary tab showing both supplier-only and our-only"""
+    st.markdown("### 📋 Discrepancy Summary")
+    col1, col2, col3 = st.columns(3)
+    col1.metric("❌ Supplier Only", t['sup_only_count'],
+                delta=f"{t['sup_only_cbd'] if 'sup_only_cbd' in t else t.get('sup_only_price',0):,.2f} NIS",
+                delta_color="inverse")
+    col2.metric("⚠️ Our Only", t['our_only_count'],
+                delta=f"{t['our_only_eup']:,.2f} NIS", delta_color="inverse")
+    gap = t.get('real_gap',0)
+    col3.metric("📊 Real Gap", f"{gap:,.2f} NIS",
+                delta="Sup Only − Our Only",
+                delta_color="inverse" if gap > 0 else "normal")
+
+    st.markdown("---")
+    combined = []
+    if len(sup_only_df) > 0:
+        for _, r in sup_only_df.iterrows():
+            combined.append({
+                'Side': '❌ Supplier Only',
+                'Date': str(r.get('Sup_Date', r.get('sup_date',''))),
+                'Phone': r.get('Phone_Display', r.get('phone_norm','')),
+                'Product': r.get('Package', r.get('TOPUP_ITEM','')),
+                'Amount (NIS)': r.get('CBD', r.get('TOPUP_PRICE',0)),
+                'What to check': r.get('Check_Instruction',''),
+            })
+    if len(our_only_df) > 0:
+        for _, r in our_only_df.iterrows():
+            combined.append({
+                'Side': '⚠️ Our Only',
+                'Date': r.get('Date & Time',''),
+                'Phone': r.get('Phone_Display',''),
+                'Product': r.get('Product Name',''),
+                'Amount (NIS)': r.get('End User Price',0),
+                'What to check': r.get('Check_Instruction',''),
+            })
+    if combined:
+        st.dataframe(pd.DataFrame(combined), use_container_width=True, hide_index=True)
+    else:
+        st.success("✅ No discrepancies!")
+
+def build_detail_rows(report_date, operator_tab, sup_only_df, our_only_df):
+    rows = []
+    if len(sup_only_df) > 0:
+        for _, r in sup_only_df.iterrows():
+            rows.append([
+                report_date, operator_tab, 'Supplier Only',
+                r.get('Phone_Display', r.get('phone_norm','')),
+                '', r.get('Package', r.get('TOPUP_ITEM','')),
+                r.get('CBD', r.get('TOPUP_PRICE',0)),
+                str(r.get('Sup_Date','')), '',
+                r.get('Reason',''), r.get('Check_Instruction',''), '⬜ Not checked'
+            ])
+    if len(our_only_df) > 0:
+        for _, r in our_only_df.iterrows():
+            rows.append([
+                report_date, operator_tab, 'Our Only',
+                r.get('Phone_Display',''),
+                r.get('Operator',''), r.get('Product Name',''),
+                r.get('End User Price',0),
+                '', r.get('Date & Time',''),
+                r.get('Reason',''), r.get('Check_Instruction',''), '⬜ Not checked'
+            ])
+    return rows
+
+# ============================================================
+# MAIN APP
+# ============================================================
+def main():
+    with st.sidebar:
+        st.markdown("### 📋 Navigation")
+        if LOGO_PAYX:
+            st.markdown(f'<img src="{LOGO_PAYX}" style="height:28px;margin-bottom:8px;">', unsafe_allow_html=True)
+        page = st.radio("", [
+            "📱 Partner & 012Talk Verification",
+            "⭐ Pelephone Verification",
+            "📡 Cellcom Verification",
+            "📅 Monthly Summary",
+            "⏳ Pending Verification",
+            "✅ Verified",
+            "ℹ️ Instructions",
+        ], label_visibility="collapsed")
+
+        st.markdown("---")
+        st.markdown("### 📊 History")
+        sh = get_spreadsheet()
+        if sh is not None:
+            st.success("✅ Google Sheets connected")
+        else:
+            st.warning("⚠️ Sheets not connected")
+        history = load_history()
+        if history:
+            st.success(f"✅ {len(history)} days recorded")
+            last = history[-1]
+            st.info(f"Last: {last.get('date','N/A')}")
+        else:
+            st.info("No history yet")
+
+    # ============================================================
+    # PAGE: PARTNER + 012TALK
+    # ============================================================
+    if page == "📱 Partner & 012Talk Verification":
+        render_header(
+            "Partner & 012Talk Charge Verification",
+            "Supplier vs Our System (Partner + 012Talk)",
+            [LOGO_PAYX, LOGO_PARTNER, LOGO_012]
+        )
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.markdown("**1️⃣ Supplier File (.xls)**")
+            sup_file = st.file_uploader("Supplier", type=['xls','xlsx','csv'],
+                                        label_visibility="collapsed", key="pt_sup")
+            st.caption("Supplier report — Charge Before Discount (col M)")
+        with col2:
+            st.markdown("**2️⃣ Partner EPRS File (.csv)**")
+            part_file = st.file_uploader("Partner EPRS", type=['csv','xlsx'],
+                                         label_visibility="collapsed", key="pt_part")
+            st.caption("Our system export — Partner operator")
+        with col3:
+            st.markdown("**3️⃣ 012Talk EPRS File (.csv)**")
+            talk_file = st.file_uploader("012Talk EPRS", type=['csv','xlsx'],
+                                         label_visibility="collapsed", key="pt_talk")
+            st.caption("Our system export — 012Talk operator")
+
+        if sup_file and part_file and talk_file:
+            if st.button("▶ Run Reconciliation", type="primary", use_container_width=True, key="pt_run"):
+                with st.spinner("Processing..."):
+                    sup_df,  e1 = load_supplier_partner(sup_file.read(), sup_file.name)
+                    part_df, e2 = load_our(part_file.read(), 'Partner')
+                    talk_df, e3 = load_our(talk_file.read(), '012Talk')
+                    if e1: st.error(f"Supplier error: {e1}"); return
+                    if e2: st.error(f"Partner error: {e2}"); return
+                    if e3: st.error(f"012Talk error: {e3}"); return
+
+                    auto_date = date.today().strftime('%Y-%m-%d')
+                    if 'Sup_Date' in sup_df.columns and len(sup_df) > 0:
+                        try:
+                            auto_date = pd.to_datetime(sup_df['Sup_Date'].iloc[0], dayfirst=True).strftime('%Y-%m-%d')
+                            st.info(f"📅 Date detected: **{auto_date}**")
+                        except: pass
+
+                    result = run_recon_partner(sup_df, part_df, talk_df, auto_date)
+                    shifts_our, shifts_sup = cross_day_match(result, auto_date, 'partner')
+                    st.session_state['pt_result'] = result
+                    st.session_state['pt_date'] = auto_date
+                    st.session_state['pt_shifts_our'] = shifts_our
+                    st.session_state['pt_shifts_sup'] = shifts_sup
+                    st.success("✅ Complete!")
+
+        if 'pt_result' in st.session_state:
+            result = st.session_state['pt_result']
+            t = result['totals']
+            rdate = st.session_state['pt_date']
+            shifts_our = st.session_state.get('pt_shifts_our',[])
+            shifts_sup = st.session_state.get('pt_shifts_sup',[])
+
+            st.markdown("---")
+            # Metrics
+            c1,c2,c3,c4,c5 = st.columns(5)
+            c1.metric("✅ Matched", f"{t['matched_count']:,}")
+            c2.metric("❌ Supplier Only", t['sup_only_count'],
+                      delta=f"{t['sup_only_cbd']:,.2f} NIS", delta_color="inverse")
+            c3.metric("⚠️ Our Only", t['our_only_count'],
+                      delta=f"{t['our_only_eup']:,.2f} NIS", delta_color="inverse")
+            c4.metric("🔄 Sup vs Pending", t['sup_pnd_count'],
+                      delta=f"{t['sup_pnd_cbd']:,.2f} NIS", delta_color="off")
+            gap = t['real_gap']
+            c5.metric("📊 Real Gap",
+                      f"+{gap:,.2f} NIS (sup higher)" if gap>0 else (f"{gap:,.2f} NIS (we higher)" if gap<0 else "0.00 NIS ✅"),
+                      delta_color="inverse" if gap>0 else "normal")
+
+            # Cross-day shifts banner
+            if shifts_our:
+                st.success(f"✅ Date Shift Confirmed: {len(shifts_our)} phone(s) from Our Only found in yesterday's Supplier Only — {', '.join(shifts_our)}")
+            if shifts_sup:
+                st.success(f"✅ Date Shift Confirmed: {len(shifts_sup)} phone(s) from Supplier Only found in yesterday's Our Only — {', '.join(shifts_sup)}")
+
+            # Action Required
+            render_action_required(result['sup_only'], result['our_only'], rdate, shifts_our, shifts_sup)
+
+            st.markdown("---")
+            tabs = st.tabs([
+                "📋 Summary",
+                f"❌ Supplier Only ({t['sup_only_count']})",
+                f"⚠️ Our Only ({t['our_only_count']})",
+                f"🔄 Sup vs Pending ({t['sup_pnd_count']})",
+                f"✅ Matched ({t['matched_count']})",
+                f"🕐 Pending ({t['pending_count']})",
+                f"↩️ Refunds ({t['refunds_count']})",
+                f"🔴 Failed ({t['failed_count']})",
+            ])
+            with tabs[0]:
+                render_summary_tab(result['sup_only'], result['our_only'], t, rdate, 'partner')
+            with tabs[1]:
+                if len(result['sup_only']) > 0:
+                    _so_cols = [c for c in ['Phone_Display','Sup_Date','Package','CBD','Check_Instruction'] if c in result['sup_only'].columns]
+                    show = result['sup_only'][_so_cols].copy()
+                    show.rename(columns={'Phone_Display':'Phone','Sup_Date':'Date','CBD':'CBD (NIS)','Check_Instruction':'What to check'}, inplace=True)
+                    st.dataframe(show, use_container_width=True, hide_index=True)
+                    st.info(f"Total: {t['sup_only_count']} phones | {t['sup_only_cbd']:,.2f} NIS")
+                else: st.success("✅ No supplier-only records!")
+            with tabs[2]:
+                if len(result['our_only']) > 0:
+                    late = result['our_only'].get('Is_Late', pd.Series(dtype=bool)).sum() if 'Is_Late' in result['our_only'].columns else 0
+                    if late > 0: st.warning(f"⏰ {late} transaction(s) after 22:00 — likely in tomorrow's supplier report")
+                    show = result['our_only'][['Phone_Display','Date & Time','Operator','Product Name','End User Price','Check_Instruction']].copy()
+                    show.columns = ['Phone','Date & Time','Operator','Product','EUP (NIS)','What to check']
+                    st.dataframe(show, use_container_width=True, hide_index=True)
+                    st.info(f"Total: {t['our_only_count']} phones | {t['our_only_eup']:,.2f} NIS")
+                else: st.success("✅ No our-only records!")
+            with tabs[3]:
+                if len(result['sup_pending']) > 0:
+                    st.dataframe(result['sup_pending'][['Phone_Display','Sup_Date','Package','CBD']].rename(
+                        columns={'Phone_Display':'Phone','Sup_Date':'Date','CBD':'CBD (NIS)'}),
+                        use_container_width=True, hide_index=True)
+                else: st.success("✅ No supplier vs pending conflicts!")
+            with tabs[4]:
+                if len(result['matched']) > 0:
+                    st.dataframe(result['matched'], use_container_width=True, hide_index=True)
+                else: st.info("No matched records")
+            with tabs[5]:
+                if len(result['pending']) > 0:
+                    st.warning(f"⚠️ {t['pending_count']} pending")
+                    show = result['pending'][['Phone_Display','Date & Time','Operator','Product Name','End User Price']].rename(columns={'Phone_Display':'Phone','End User Price':'EUP (NIS)'})
+                    st.dataframe(show, use_container_width=True, hide_index=True)
+                else: st.success("✅ No pending!")
+            with tabs[6]:
+                if len(result['refunds']) > 0:
+                    show = result['refunds'][['Operator','Phone_Display','Date & Time','Product Name','End User Price']].rename(columns={'Phone_Display':'Phone','End User Price':'EUP (NIS)'})
+                    st.dataframe(show, use_container_width=True, hide_index=True)
+                else: st.info("No refunds")
+            with tabs[7]:
+                if len(result['failed']) > 0:
+                    show = result['failed'][['Operator','Phone_Display','Date & Time','Product Name','Error description']].rename(columns={'Phone_Display':'Phone'})
+                    st.dataframe(show, use_container_width=True, hide_index=True)
+                else: st.success("✅ No failed!")
+
+            # Net billing
+            st.markdown("---")
+            st.markdown("### 💰 Net Billing Summary")
+            net_data = {
+                'Item': ['Our EUP — DONE+CANCELLED','Refunds (credit back)','PENDING',
+                         'NET Our Total','Supplier CBD (matched)','Supplier Only CBD','📊 Real Gap'],
+                'Partner (NIS)': [round(t['partner_eup'],2), round(t['partner_ref'],2), round(t['pending_eup'],2),
+                                  round(t['partner_eup']+t['partner_ref'],2), '—','—','—'],
+                '012Talk (NIS)': [round(t['talk012_eup'],2), round(t['talk012_ref'],2), 0,
+                                  round(t['talk012_eup']+t['talk012_ref'],2), '—','—','—'],
+                'TOTAL (NIS)': [
+                    round(t['partner_eup']+t['talk012_eup'],2),
+                    round(t['partner_ref']+t['talk012_ref'],2),
+                    round(t['pending_eup'],2),
+                    round(t['partner_eup']+t['talk012_eup']+t['partner_ref']+t['talk012_ref'],2),
+                    round(t['sup_cbd'],2), round(t['sup_only_cbd'],2), round(t['real_gap'],2)
+                ],
+            }
+            st.dataframe(pd.DataFrame(net_data), use_container_width=True, hide_index=True)
+
+            st.markdown("---")
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("💾 Save to Monthly History", use_container_width=True, key="pt_save"):
+                    record = {
+                        'date': rdate, 'operator_tab': 'partner',
+                        'sup_cbd': round(t['sup_cbd'],2), 'our_eup': round(t['our_eup'],2),
+                        'diff': round(t['diff'],2), 'matched_count': t['matched_count'],
+                        'sup_only_count': t['sup_only_count'], 'sup_only_cbd': round(t['sup_only_cbd'],2),
+                        'our_only_count': t['our_only_count'], 'our_only_eup': round(t['our_only_eup'],2),
+                        'real_gap': round(t['real_gap'],2), 'pending_count': t['pending_count'],
+                        'refunds_eup': round(t['refunds_eup'],2),
+                        'net_billed': round(t['partner_eup']+t['talk012_eup']+t['partner_ref']+t['talk012_ref'],2),
+                    }
+                    ok, msg = save_to_sheets(record)
+                    detail_rows = build_detail_rows(rdate, 'partner', result['sup_only'], result['our_only'])
+                    ok2, msg2 = save_details_to_sheets(rdate, 'partner', detail_rows)
+                    st.success(f"✅ {msg}") if ok else st.warning(f"⚠️ {msg}")
+                    st.info(f"📋 {msg2}") if ok2 else st.warning(f"⚠️ {msg2}")
+            with col2:
+                excel_buf = create_excel_report(result, rdate, 'Partner & 012Talk')
+                st.download_button("📥 Download Excel Report", data=excel_buf,
+                    file_name=f"Partner_012Talk_{rdate.replace('-','_')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True, type="primary")
+
+    # ============================================================
+    # PAGE: PELEPHONE
+    # ============================================================
+    elif page == "⭐ Pelephone Verification":
+        render_header(
+            "Pelephone Charge Verification",
+            "Supplier vs Our System (Pelephone + GlobalSim + eSIM)",
+            [LOGO_PAYX, LOGO_PELE]
+        )
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.markdown("**1️⃣ Supplier File (.xlsx)**")
+            sup_file = st.file_uploader("Pelephone Supplier", type=['xlsx','xls'],
+                                        label_visibility="collapsed", key="pe_sup")
+            st.caption("Pelephone supplier report (col F = price)")
+        with col2:
+            st.markdown("**2️⃣ Pelephone EPRS File (.csv)**")
+            pele_file = st.file_uploader("Pelephone EPRS", type=['csv'],
+                                         label_visibility="collapsed", key="pe_pele")
+        with col3:
+            st.markdown("**3️⃣ GlobalSim EPRS File (.csv)**")
+            glob_file = st.file_uploader("GlobalSim EPRS", type=['csv'],
+                                         label_visibility="collapsed", key="pe_glob")
+        with col4:
+            st.markdown("**4️⃣ eSIM EPRS File (.csv)**")
+            esim_file = st.file_uploader("eSIM EPRS", type=['csv'],
+                                         label_visibility="collapsed", key="pe_esim")
+            st.caption("eSIM: our 5 NIS vs supplier 7.67 NIS")
+
+        if sup_file and pele_file and glob_file and esim_file:
+            if st.button("▶ Run Reconciliation", type="primary", use_container_width=True, key="pe_run"):
+                with st.spinner("Processing..."):
+                    sup_df,  e1 = load_supplier_pelephone(sup_file.read())
+                    pele_df, e2 = load_our(pele_file.read(), 'Pelephone')
+                    glob_df, e3 = load_our(glob_file.read(), 'GlobalSim')
+                    esim_df, e4 = load_our(esim_file.read(), 'eSIM')
+                    if e1: st.error(f"Supplier error: {e1}"); return
+                    if e2: st.error(f"Pelephone error: {e2}"); return
+                    if e3: st.error(f"GlobalSim error: {e3}"); return
+                    if e4: st.error(f"eSIM error: {e4}"); return
+
+                    auto_date = date.today().strftime('%Y-%m-%d')
+                    if 'Sup_Date' in sup_df.columns and len(sup_df) > 0:
+                        try:
+                            raw = str(sup_df['Sup_Date'].iloc[0])
+                            auto_date = pd.to_datetime(raw, dayfirst=True).strftime('%Y-%m-%d')
+                            st.info(f"📅 Date detected: **{auto_date}**")
+                        except: pass
+
+                    result = run_recon_pelephone(sup_df, pele_df, glob_df, esim_df, auto_date)
+                    shifts_our, shifts_sup = cross_day_match(result, auto_date, 'pelephone')
+                    st.session_state['pe_result'] = result
+                    st.session_state['pe_date'] = auto_date
+                    st.session_state['pe_shifts_our'] = shifts_our
+                    st.session_state['pe_shifts_sup'] = shifts_sup
+                    st.success("✅ Complete!")
+
+        if 'pe_result' in st.session_state:
+            result = st.session_state['pe_result']
+            t = result['totals']
+            rdate = st.session_state['pe_date']
+            shifts_our = st.session_state.get('pe_shifts_our',[])
+            shifts_sup = st.session_state.get('pe_shifts_sup',[])
+
+            st.markdown("---")
+            c1,c2,c3,c4,c5 = st.columns(5)
+            c1.metric("✅ Matched", f"{t['matched_count']:,}")
+            c2.metric("❌ Supplier Only", t['sup_only_count'],
+                      delta=f"{t['sup_only_price']:,.2f} NIS", delta_color="inverse")
+            c3.metric("⚠️ Our Only", t['our_only_count'],
+                      delta=f"{t['our_only_eup']:,.2f} NIS", delta_color="inverse")
+            c4.metric("📟 eSIM Diffs", t['esim_diff_count'],
+                      delta=f"{t['esim_diff_total']:,.2f} NIS (expected +2.67 each)", delta_color="off")
+            gap = t['real_gap']
+            c5.metric("📊 Real Gap",
+                      f"+{gap:,.2f} NIS" if gap>0 else (f"{gap:,.2f} NIS" if gap<0 else "0.00 NIS ✅"),
+                      delta_color="inverse" if gap>0 else "normal")
+
+            if shifts_our:
+                st.success(f"✅ Date Shift: {len(shifts_our)} phone(s) confirmed — {', '.join(shifts_our)}")
+
+            render_action_required(result['sup_only'], result['our_only'], rdate, shifts_our, shifts_sup)
+
+            st.markdown("---")
+            tabs = st.tabs([
+                "📋 Summary",
+                f"❌ Supplier Only ({t['sup_only_count']})",
+                f"⚠️ Our Only ({t['our_only_count']})",
+                f"✅ Matched ({t['matched_count']})",
+                f"↩️ Refunds ({t['refunds_count']})",
+                f"🔴 Failed ({t['failed_count']})",
+            ])
+            with tabs[0]:
+                render_summary_tab(result['sup_only'], result['our_only'], t, rdate, 'pelephone')
+                if t['esim_diff_count'] > 0:
+                    st.markdown("#### 📟 eSIM Price Difference")
+                    st.info(f"eSIM: {t['esim_diff_count']} transactions | Expected diff: +{t['esim_diff_count']*2.67:.2f} NIS | Actual: {t['esim_diff_total']:,.2f} NIS")
+                if t['unexpected_diff_count'] > 0:
+                    st.warning(f"⚠️ {t['unexpected_diff_count']} transaction(s) with unexpected price differences — check Matched tab")
+            with tabs[1]:
+                if len(result['sup_only']) > 0:
+                    sup_only_cols = ['Phone_Display','Sup_Date','TOPUP_ITEM','TOPUP_PRICE','Check_Instruction']
+                    if 'Sup_Time' in result['sup_only'].columns:
+                        sup_only_cols.insert(2, 'Sup_Time')
+                    show = result['sup_only'][[c for c in sup_only_cols if c in result['sup_only'].columns]].copy()
+                    show.columns = show.columns.str.replace('Phone_Display','Phone').str.replace('Sup_Date','Date').str.replace('Sup_Time','Time').str.replace('TOPUP_ITEM','Product').str.replace('TOPUP_PRICE','Price (NIS)').str.replace('Check_Instruction','What to check')
+                    st.dataframe(show, use_container_width=True, hide_index=True)
+                else: st.success("✅ No supplier-only!")
+            with tabs[2]:
+                if len(result['our_only']) > 0:
+                    show = result['our_only'][['Phone_Display','Date & Time','Operator','Product Name','End User Price','Check_Instruction']].rename(
+                        columns={'Phone_Display':'Phone','End User Price':'EUP (NIS)','Check_Instruction':'What to check'})
+                    st.dataframe(show, use_container_width=True, hide_index=True)
+                else: st.success("✅ No our-only!")
+            with tabs[3]:
+                if len(result['matched']) > 0:
+                    st.dataframe(result['matched'], use_container_width=True, hide_index=True)
+                else: st.info("No matched records")
+            with tabs[4]:
+                if len(result['refunds']) > 0:
+                    show = result['refunds'][['Operator','Phone_Display','Date & Time','Product Name','End User Price']].rename(
+                        columns={'Phone_Display':'Phone','End User Price':'EUP (NIS)'})
+                    st.dataframe(show, use_container_width=True, hide_index=True)
+                else: st.info("No refunds")
+            with tabs[5]:
+                if len(result['failed']) > 0:
+                    show = result['failed'][['Operator','Phone_Display','Date & Time','Product Name','Error description']].rename(
+                        columns={'Phone_Display':'Phone'})
+                    st.dataframe(show, use_container_width=True, hide_index=True)
+                else: st.success("✅ No failed!")
+
+            st.markdown("---")
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("💾 Save to Monthly History", use_container_width=True, key="pe_save"):
+                    record = {
+                        'date': rdate, 'operator_tab': 'pelephone',
+                        'sup_cbd': round(t['sup_price'],2), 'our_eup': round(t['our_eup'],2),
+                        'diff': round(t['diff'],2), 'matched_count': t['matched_count'],
+                        'sup_only_count': t['sup_only_count'], 'sup_only_cbd': round(t['sup_only_price'],2),
+                        'our_only_count': t['our_only_count'], 'our_only_eup': round(t['our_only_eup'],2),
+                        'real_gap': round(t['real_gap'],2), 'pending_count': 0,
+                        'refunds_eup': round(t['refunds_eup'],2), 'net_billed': round(t['our_eup'],2),
+                    }
+                    ok, msg = save_to_sheets(record)
+                    detail_rows = build_detail_rows(rdate, 'pelephone', result['sup_only'], result['our_only'])
+                    ok2, msg2 = save_details_to_sheets(rdate, 'pelephone', detail_rows)
+                    st.success(f"✅ {msg}") if ok else st.warning(f"⚠️ {msg}")
+                    st.info(f"📋 {msg2}") if ok2 else st.warning(f"⚠️ {msg2}")
+            with col2:
+                st.info("Excel export for Pelephone — coming soon")
+
+    # ============================================================
+    # PAGE: CELLCOM
+    # ============================================================
+    elif page == "📡 Cellcom Verification":
+        render_header(
+            "Cellcom Charge Verification",
+            "Supplier vs Our System (Cellcom)",
+            [LOGO_PAYX, LOGO_CELL]
+        )
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("**1️⃣ Cellcom Supplier File (.xlsx)**")
+            sup_file = st.file_uploader("Cellcom Supplier", type=['xlsx','xls'],
+                                        label_visibility="collapsed", key="ce_sup")
+            st.caption("Supplier report — col C = charge amount, col G = phone")
+        with col2:
+            st.markdown("**2️⃣ Cellcom EPRS File (.csv)**")
+            our_file = st.file_uploader("Cellcom EPRS", type=['csv'],
+                                        label_visibility="collapsed", key="ce_our")
+            st.caption("Our system export — Cellcom operator")
+
+        if sup_file and our_file:
+            if st.button("▶ Run Reconciliation", type="primary", use_container_width=True, key="ce_run"):
+                with st.spinner("Processing..."):
+                    sup_df, e1 = load_supplier_cellcom(sup_file.read())
+                    our_df, e2 = load_our(our_file.read(), 'Cellcom')
+                    if e1: st.error(f"Supplier error: {e1}"); return
+                    if e2: st.error(f"Our file error: {e2}"); return
+
+                    auto_date = date.today().strftime('%Y-%m-%d')
+                    if 'Sup_Date' in sup_df.columns and len(sup_df) > 0:
+                        try:
+                            auto_date = sup_df['Sup_Date'].iloc[0].strftime('%Y-%m-%d')
+                            st.info(f"📅 Date detected: **{auto_date}**")
+                        except: pass
+
+                    result = run_recon_cellcom(sup_df, our_df, auto_date)
+                    shifts_our, shifts_sup = cross_day_match(result, auto_date, 'cellcom')
+                    st.session_state['ce_result'] = result
+                    st.session_state['ce_date'] = auto_date
+                    st.session_state['ce_shifts_our'] = shifts_our
+                    st.session_state['ce_shifts_sup'] = shifts_sup
+                    st.success("✅ Complete!")
+
+        if 'ce_result' in st.session_state:
+            result = st.session_state['ce_result']
+            t = result['totals']
+            rdate = st.session_state['ce_date']
+            shifts_our = st.session_state.get('ce_shifts_our',[])
+            shifts_sup = st.session_state.get('ce_shifts_sup',[])
+
+            st.markdown("---")
+            c1,c2,c3,c4,c5 = st.columns(5)
+            c1.metric("✅ Matched", f"{t['matched_count']:,}")
+            c2.metric("❌ Supplier Only", t['sup_only_count'],
+                      delta=f"{t['sup_only_cbd']:,.2f} NIS", delta_color="inverse")
+            c3.metric("⚠️ Our Only", t['our_only_count'],
+                      delta=f"{t['our_only_eup']:,.2f} NIS", delta_color="inverse")
+            c4.metric("💱 Expected Discount", f"{t['total_expected_discount']:,.2f} NIS",
+                      delta=f"~5 NIS × {t['matched_count']} (fixed tariffs excluded)", delta_color="off")
+            c5.metric("⚠️ Unexplained Diff",
+                      f"{t['unexplained_diff']:,.2f} NIS" if abs(t['unexplained_diff']) > 0.01 else "0.00 ✅",
+                      delta="Should be 0" if abs(t['unexplained_diff']) > 0.01 else None,
+                      delta_color="inverse" if abs(t['unexplained_diff']) > 0.01 else "off")
+
+            if shifts_our:
+                st.success(f"✅ Date Shift: {len(shifts_our)} phone(s) confirmed — {', '.join(shifts_our)}")
+
+            # Unexplained diff warning
+            if abs(t['unexplained_diff']) > 0.01:
+                st.warning(f"⚠️ Unexplained price difference: {t['unexplained_diff']:,.2f} NIS — "
+                          f"Expected discount: {t['total_expected_discount']:,.2f} NIS but actual differs. "
+                          f"Check '{t['price_anomaly_count']}' anomaly transactions in Matched tab.")
+
+            render_action_required(result['sup_only'], result['our_only'], rdate, shifts_our, shifts_sup)
+
+            st.markdown("---")
+            tabs = st.tabs([
+                "📋 Summary",
+                f"❌ Supplier Only ({t['sup_only_count']})",
+                f"⚠️ Our Only ({t['our_only_count']})",
+                f"✅ Matched ({t['matched_count']})",
+                f"↩️ Refunds ({t['refunds_count']})",
+                f"🔴 Failed ({t['failed_count']})",
+            ])
+            with tabs[0]:
+                render_summary_tab(result['sup_only'], result['our_only'], t, rdate, 'cellcom')
+                st.markdown("#### 💱 Price Analysis")
+                price_data = {
+                    'Item': [
+                        f'Matched transactions ({t["matched_count"]})',
+                        'Expected total discount (~5 NIS each, excl. fixed tariffs)',
+                        'Actual total discount',
+                        '⚠️ Unexplained difference',
+                    ],
+                    'Amount (NIS)': [
+                        round(t['our_eup'],2),
+                        round(t['total_expected_discount'],2),
+                        round(t['our_eup'] - t['sup_cbd'],2),
+                        round(t['unexplained_diff'],2),
+                    ]
+                }
+                st.dataframe(pd.DataFrame(price_data), use_container_width=True, hide_index=True)
+            with tabs[1]:
+                if len(result['sup_only']) > 0:
+                    show = result['sup_only'][['Phone_Display','Sup_Date','CBD','Check_Instruction']].rename(
+                        columns={'Phone_Display':'Phone','Sup_Date':'Date','CBD':'CBD (NIS)','Check_Instruction':'What to check'})
+                    st.dataframe(show, use_container_width=True, hide_index=True)
+                else: st.success("✅ No supplier-only!")
+            with tabs[2]:
+                if len(result['our_only']) > 0:
+                    show = result['our_only'][['Phone_Display','Date & Time','Product Name','End User Price','Check_Instruction']].rename(
+                        columns={'Phone_Display':'Phone','End User Price':'EUP (NIS)','Check_Instruction':'What to check'})
+                    st.dataframe(show, use_container_width=True, hide_index=True)
+                else: st.success("✅ No our-only!")
+            with tabs[3]:
+                if len(result['matched']) > 0:
+                    st.dataframe(result['matched'], use_container_width=True, hide_index=True)
+                    if len(result['anomalies']) > 0:
+                        st.warning(f"⚠️ {len(result['anomalies'])} transaction(s) with unexpected price diff:")
+                        st.dataframe(result['anomalies'], use_container_width=True, hide_index=True)
+                else: st.info("No matched records")
+            with tabs[4]:
+                if len(result['refunds']) > 0:
+                    show = result['refunds'][['Phone_Display','Date & Time','Product Name','End User Price']].rename(
+                        columns={'Phone_Display':'Phone','End User Price':'EUP (NIS)'})
+                    st.dataframe(show, use_container_width=True, hide_index=True)
+                else: st.info("No refunds")
+            with tabs[5]:
+                if len(result['failed']) > 0:
+                    show = result['failed'][['Phone_Display','Date & Time','Product Name','Error description']].rename(
+                        columns={'Phone_Display':'Phone'})
+                    st.dataframe(show, use_container_width=True, hide_index=True)
+                else: st.success("✅ No failed!")
+
+            st.markdown("---")
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("💾 Save to Monthly History", use_container_width=True, key="ce_save"):
+                    record = {
+                        'date': rdate, 'operator_tab': 'cellcom',
+                        'sup_cbd': round(t['sup_cbd'],2), 'our_eup': round(t['our_eup'],2),
+                        'diff': round(t['our_eup']-t['sup_cbd'],2),
+                        'matched_count': t['matched_count'],
+                        'sup_only_count': t['sup_only_count'], 'sup_only_cbd': round(t['sup_only_cbd'],2),
+                        'our_only_count': t['our_only_count'], 'our_only_eup': round(t['our_only_eup'],2),
+                        'real_gap': round(t['real_gap'],2), 'pending_count': t['pending_count'],
+                        'refunds_eup': round(t['refunds_eup'],2), 'net_billed': round(t['our_eup'],2),
+                    }
+                    ok, msg = save_to_sheets(record)
+                    detail_rows = build_detail_rows(rdate, 'cellcom', result['sup_only'], result['our_only'])
+                    ok2, msg2 = save_details_to_sheets(rdate, 'cellcom', detail_rows)
+                    st.success(f"✅ {msg}") if ok else st.warning(f"⚠️ {msg}")
+                    st.info(f"📋 {msg2}") if ok2 else st.warning(f"⚠️ {msg2}")
+            with col2:
+                st.info("Excel export for Cellcom — coming soon")
+
+    # ============================================================
+    # PAGE: MONTHLY SUMMARY
+    # ============================================================
+    elif page == "📅 Monthly Summary":
+        render_header("Monthly Summary", "All operators — month overview", [LOGO_PAYX])
+        sh = get_spreadsheet()
+        available_months = []
+        if sh is not None:
+            try:
+                for ws in sh.worksheets():
+                    if _is_month_sheet(ws.title):
+                        try:
+                            dt = datetime.strptime(ws.title, '%B %Y')
+                            available_months.append(dt.strftime('%Y-%m'))
+                        except: pass
+                available_months = sorted(set(available_months), reverse=True)
+            except: pass
+
+        if not available_months:
+            history = _load_local_history()
+            available_months = sorted(set(h['date'][:7] for h in history), reverse=True)
+
+        if not available_months:
+            st.info("No history yet. Run daily reconciliations and click 'Save to Monthly History'.")
+            return
+
+        col1, col2 = st.columns([2,1])
+        with col1:
+            selected_month = st.selectbox("Select Month", available_months,
+                format_func=lambda m: datetime.strptime(m, '%Y-%m').strftime('%B %Y'))
+        with col2:
+            op_filter = st.selectbox("Operator", ["All","partner","pelephone","cellcom"])
+
+        month_history = load_history(month=selected_month,
+                                     operator_tab=None if op_filter=="All" else op_filter)
+        if not month_history:
+            st.warning("No data for selected month/operator")
+            return
+
+        total_sup  = sum(h.get('sup_cbd',0) for h in month_history)
+        total_eup  = sum(h.get('our_eup',0) for h in month_history)
+        total_gap  = sum(h.get('real_gap',0) for h in month_history)
+        total_ref  = sum(h.get('refunds_eup',0) for h in month_history)
+
+        c1,c2,c3,c4,c5 = st.columns(5)
+        c1.metric("📅 Days", len(month_history))
+        c2.metric("Supplier Total", f"{total_sup:,.2f} NIS")
+        c3.metric("Our EUP Total", f"{total_eup:,.2f} NIS")
+        c4.metric("↩️ Refunds", f"{total_ref:,.2f} NIS")
+        c5.metric("📊 Monthly Real Gap", f"{total_gap:,.2f} NIS",
+                  delta_color="inverse" if total_gap>0 else "normal")
+
+        st.markdown("---")
+        df = pd.DataFrame(month_history)
+        # Show clean columns only
+        show_cols = [c for c in ['date','operator_tab','matched_count','sup_cbd','our_eup',
+                                  'diff','refunds_eup','net_billed'] if c in df.columns]
+        st.dataframe(df[show_cols], use_container_width=True, hide_index=True)
+
+        month_label = datetime.strptime(selected_month, '%Y-%m').strftime('%B %Y')
+        st.download_button(
+            f"📥 Download Monthly Report — {month_label}",
+            data=create_monthly_excel(month_history, month_label),
+            file_name=f"Monthly_{selected_month.replace('-','_')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True, type="primary"
+        )
+
+    # ============================================================
+    # PAGE: PENDING VERIFICATION
+    # ============================================================
+    elif page == "⏳ Pending Verification":
+        render_header("Pending Verification", "Phones awaiting manual check", [LOGO_PAYX])
+        pending = load_pending_verifications()
+        if not pending:
+            st.success("✅ Nothing pending — all verified!")
+            return
+
+        st.warning(f"⏳ {len(pending)} phone(s) need verification")
+        sh = get_spreadsheet()
+        df = pd.DataFrame(pending)
+        for i, row in enumerate(pending):
+            with st.expander(f"📱 {row.get('phone','')} | {row.get('date','')} | {row.get('operator_tab','').upper()} | {row.get('category','')}"):
+                c1,c2 = st.columns(2)
+                c1.write(f"**Product:** {row.get('product','')}")
+                c1.write(f"**Amount:** {row.get('amount','')} NIS")
+                c1.write(f"**Date:** {row.get('our_date','') or row.get('sup_date','')}")
+                c2.write("**What to check:**")
+                c2.info(row.get('check_instruction',''))
+                new_status = st.selectbox(
+                    "Update status:",
+                    ["⬜ Not checked", "✅ Found — OK (date shift confirmed)",
+                     "✅ Found in our reports", "❌ Not found — investigate"],
+                    key=f"pend_{i}"
+                )
+                if st.button("Save", key=f"pend_save_{i}"):
+                    if sh and update_verification(sh, row.get('phone',''), row.get('date',''), row.get('operator_tab',''), new_status):
+                        st.success("Updated!")
+                        st.rerun()
+
+    # ============================================================
+    # PAGE: VERIFIED
+    # ============================================================
+    elif page == "✅ Verified":
+        render_header("Verified Transactions", "Completed verifications", [LOGO_PAYX])
+        verified = load_verified()
+        if not verified:
+            st.info("No verified transactions yet.")
+            return
+        df = pd.DataFrame(verified)
+        show_cols = [c for c in ['date','operator_tab','category','phone','product','amount','verified','check_instruction'] if c in df.columns]
+        st.dataframe(df[show_cols], use_container_width=True, hide_index=True)
+        st.success(f"✅ {len(verified)} transactions verified")
+
+    # ============================================================
+    # PAGE: INSTRUCTIONS
+    # ============================================================
+    elif page == "ℹ️ Instructions":
+        render_header("Instructions", "How to use the dashboard", [LOGO_PAYX])
+        st.markdown("""
+        ### 📋 Daily Process
+
+        **Partner & 012Talk:**
+        1. Upload Supplier `.xls` file
+        2. Upload Partner EPRS `.csv` file
+        3. Upload 012Talk EPRS `.csv` file
+        4. Click **▶ Run Reconciliation**
+        5. Review **Action Required** block — check each phone
+        6. Click **💾 Save to Monthly History**
+
+        **Pelephone:**
+        1. Upload Supplier `.xlsx` file
+        2. Upload Pelephone EPRS, GlobalSim EPRS, eSIM EPRS files
+        3. Matching is done by Order Number = Transaction ID (exact match)
+        4. eSIM transactions: expected difference is +2.67 NIS (supplier 7.67 vs our 5.00)
+
+        **Cellcom:**
+        1. Upload Supplier `.xlsx` file
+        2. Upload Cellcom EPRS `.csv` file
+        3. Fixed tariffs (15, 19, 49 NIS) — no price difference expected
+        4. All other tariffs — supplier charges ~5 NIS less than our EUP
+        5. "Unexplained Diff" should be 0.00 — if not, check anomaly rows
+
+        ---
+
+        ### 🔍 Verification Flow
+        - **Action Required** block shows all phones needing verification
+        - **What to check** column tells you exactly where to look
+        - After checking, go to **⏳ Pending Verification** to update status
+        - Verified items move to **✅ Verified**
+
+        ---
+
+        ### ⚠️ Important Rules
+        - Always use original `.xls`/`.xlsx` supplier files — CSV truncates phone numbers
+        - REFUND rows = credits from previous period
+        - Late transactions (after 22:00) typically appear in NEXT day's supplier report
+        - REWARD and REFUND_REWARD rows are automatically excluded
+        """)
+
+
+# ============================================================
+# EXCEL EXPORTS (simplified for new structure)
+# ============================================================
+def create_excel_report(result, report_date, tab_name):
     wb = openpyxl.Workbook()
     wb.remove(wb.active)
 
     def bd():
         s = Side(style='thin', color='CCCCCC')
         return Border(left=s, right=s, top=s, bottom=s)
-
-    def H(cell, bg, fg='FFFFFF', sz=10, bold=True):
-        cell.font = Font(bold=bold, color=fg, size=sz, name='Arial')
+    def H(cell, bg, fg='FFFFFF', sz=10):
+        cell.font = Font(bold=True, color=fg, size=sz, name='Arial')
         cell.fill = PatternFill('solid', start_color=bg)
         cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
         cell.border = bd()
-
-    def D(cell, bg='FFFFFF', align='left', fg='000000', fmt=None, bold=False):
-        cell.font = Font(color=fg, size=9, name='Arial', bold=bold)
+    def D(cell, bg='FFFFFF', align='left', fmt=None):
+        cell.font = Font(size=9, name='Arial')
         cell.fill = PatternFill('solid', start_color=bg)
         cell.alignment = Alignment(horizontal=align, vertical='center')
         cell.border = bd()
-        if fmt:
-            cell.number_format = fmt
+        if fmt: cell.number_format = fmt
 
-    NAVY = '1F3864'; BLUE = '2E75B6'; LBLUE = 'DEEAF1'
-    ORANGE = 'C55A11'; LORAN = 'FCE4D6'
-    GREEN = '375623'; LGREEN = 'E2EFDA'
-    RED = 'C00000'; LRED = 'FFE0E0'
-    YELL = 'FFE699'; LYELL = 'FFFACD'
-    TEAL = '00695C'; LTEAL = 'E0F2F1'
-    PURPLE = '4A148C'; LPURP = 'EDE7F6'
-    WHITE = 'FFFFFF'
+    NAVY='1F3864'; LBLUE='DEEAF1'; RED='C00000'
+    LRED='FFE0E0'; WHITE='FFFFFF'
+    TEAL='00695C'; LTEAL='E0F2F1'
 
     t = result['totals']
 
-    def ttl(ws, txt, ncols, bg, sz=12):
-        ws.merge_cells(f'A1:{get_column_letter(ncols)}1')
-        ws['A1'].value = txt
-        ws['A1'].font = Font(bold=True, color='FFFFFF', size=sz, name='Arial')
-        ws['A1'].fill = PatternFill('solid', start_color=bg)
+    def write_sheet(ws, title_txt, df, hdr_bg, alt_bg, num_cols=None, ncols=None):
+        nc = ncols or (len(df.columns) if len(df) > 0 else 8)
+        ws.merge_cells(f'A1:{get_column_letter(nc)}1')
+        ws['A1'].value = title_txt
+        ws['A1'].font = Font(bold=True, color='FFFFFF', size=12, name='Arial')
+        ws['A1'].fill = PatternFill('solid', start_color=hdr_bg)
         ws['A1'].alignment = Alignment(horizontal='center', vertical='center')
         ws['A1'].border = bd()
-        ws.row_dimensions[1].height = 30
-
-    def sec(ws, r, txt, ncols, bg):
-        ws.merge_cells(f'A{r}:{get_column_letter(ncols)}{r}')
-        ws[f'A{r}'].value = txt
-        H(ws[f'A{r}'], bg, sz=11)
-        ws.row_dimensions[r].height = 22
-
-    def write_df(ws, df, start_row, hdr_bg, alt_bg, num_cols=None):
-        if len(df) == 0:
-            return start_row
+        ws.row_dimensions[1].height = 28
+        if len(df) == 0: return
         for ci, col in enumerate(df.columns, 1):
-            H(ws.cell(row=start_row, column=ci, value=col), hdr_bg, sz=9)
-        ws.row_dimensions[start_row].height = 35
+            H(ws.cell(row=2, column=ci, value=col), hdr_bg)
+        ws.row_dimensions[2].height = 30
         for ri, (_, row) in enumerate(df.iterrows()):
-            r = start_row + 1 + ri
-            bg = alt_bg if ri % 2 == 0 else WHITE
+            r = ri + 3
+            bg = alt_bg if ri%2==0 else WHITE
             for ci, col in enumerate(df.columns, 1):
                 val = row[col]
                 if pd.isna(val): val = ''
                 cell = ws.cell(row=r, column=ci, value=val)
                 is_num = num_cols and col in num_cols
-                fmt = '#,##0.00' if is_num else None
-                D(cell, bg, align='right' if is_num else ('center' if ci > 1 else 'left'), fmt=fmt)
+                D(cell, bg, align='right' if is_num else 'left',
+                  fmt='#,##0.00' if is_num else None)
             ws.row_dimensions[r].height = 15
-        return start_row + 1 + len(df)
+        ws.freeze_panes = 'A3'
 
-    # ---- SHEET 1: SUMMARY ----
-    wss = wb.create_sheet("Summary")
-    ttl(wss, f"📊  RECONCILIATION SUMMARY  —  {report_date}", 7, NAVY, 14)
-
-    sec(wss, 3, "A.  TRANSACTION COUNT DISCREPANCY", 7, BLUE)
-    for ci, h in enumerate(["Category", "# Phones / Tx", "Amount (NIS)", "Description", "Action Required", "", ""], 1):
-        H(wss.cell(row=4, column=ci, value=h), NAVY)
-    wss.row_dimensions[4].height = 28
-
-    gap_text  = f"Supplier charges MORE by {t['real_gap']:,.2f} NIS" if t['real_gap'] > 0 else \
-                (f"We charge MORE by {abs(t['real_gap']):,.2f} NIS" if t['real_gap'] < 0 else "Balanced")
-
-    rows_a = [
-        ("✅  MATCHED",              t['matched_count'],        round(t['sup_cbd'], 2),        "Phone in BOTH — DONE/CANCELLED",                         "—",                              LGREEN),
-        ("❌  SUPPLIER ONLY",        t['sup_only_count'],        round(t['sup_only_cbd'], 2),   "Supplier charges — NOT in our system",                   "Investigate each phone",         LRED),
-        ("⚠️  OUR SYSTEM ONLY",      t['our_only_count'],        round(t['our_only_eup'], 2),   "We charged — supplier does NOT list",                    "Check if date shift",            LYELL),
-        ("🔄  SUP vs PENDING",       t['sup_pending_count'],     round(t['sup_pending_cbd'], 2),"Supplier charged — we have PENDING",                     "Verify cancellation next day",   LPURP),
-        ("🕐  PENDING (ours)",        t['pending_count'],         round(t['pending_eup'], 2),    "Awaiting supplier decision",                             "Check next day",                 LPURP),
-        ("↩️  REFUNDS",              t['refunds_count'],         round(t['refunds_eup'], 2),    "Credits from previous period",                           "Deduct from month total",        LTEAL),
-        ("📊  REAL GAP",             t['sup_only_count'] - t['our_only_count'], round(t['real_gap'], 2), gap_text, "= Supplier Only CBD − Our Only EUP", LORAN),
-    ]
-    for i, (cat, cnt, amt, desc, action, bg) in enumerate(rows_a):
-        r = 5 + i
-        for ci, val in enumerate([cat, cnt, amt, desc, action, '', ''], 1):
-            cell = wss.cell(row=r, column=ci, value=val)
-            D(cell, bg, align='left' if ci in [1, 4, 5] else 'center', bold=(ci == 1))
-            if ci == 3 and isinstance(val, float):
-                cell.number_format = '#,##0.00'
-        wss.row_dimensions[r].height = 20
-
-    sec(wss, 13, "B.  NET BILLING SUMMARY", 7, GREEN)
-    for ci, h in enumerate(["Item", "Partner (NIS)", "012Talk (NIS)", "TOTAL (NIS)", "", "", ""], 1):
-        H(wss.cell(row=14, column=ci, value=h), GREEN)
-    net = [
-        ("Our EUP — DONE+CANCELLED",      round(t['partner_eup'], 2),  round(t['talk012_eup'], 2),  round(t['partner_eup'] + t['talk012_eup'], 2),                                           LBLUE),
-        ("Refunds — credit back",          round(t['partner_ref'], 2),  round(t['talk012_ref'], 2),  round(t['partner_ref'] + t['talk012_ref'], 2),                                           LTEAL),
-        ("PENDING (unconfirmed)",          round(t['pending_eup'], 2),  0.0,                         round(t['pending_eup'], 2),                                                               LPURP),
-        ("NET Our System Total",           round(t['partner_eup'] + t['partner_ref'], 2), round(t['talk012_eup'] + t['talk012_ref'], 2), round(t['partner_eup'] + t['talk012_eup'] + t['partner_ref'] + t['talk012_ref'], 2), LYELL),
-        ("Supplier CBD — matched phones",  '—', '—', round(t['sup_cbd'], 2),                                                                                                                  LORAN),
-        ("Supplier CBD — supplier only",   '—', '—', round(t['sup_only_cbd'], 2),                                                                                                             LRED),
-        ("REAL GAP (Sup Only − Our Only)", '—', '—', round(t['real_gap'], 2),                                                                                                                 LORAN),
-    ]
-    for i, row in enumerate(net):
-        r = 15 + i
-        bg = row[-1]
-        is_bold = i in [3, 6]
-        for ci, val in enumerate(row[:-1], 1):
-            cell = wss.cell(row=r, column=ci, value=val)
-            D(cell, bg, align='left' if ci == 1 else 'center', bold=is_bold or ci == 1)
-            if ci in [2, 3, 4] and isinstance(val, float):
-                cell.number_format = '#,##0.00'
-        wss.row_dimensions[r].height = 18
-
-    wss.column_dimensions['A'].width = 34
-    wss.column_dimensions['B'].width = 18
-    wss.column_dimensions['C'].width = 20
-    wss.column_dimensions['D'].width = 40
-    wss.column_dimensions['E'].width = 30
-    wss.freeze_panes = 'A3'
-
-    # ---- SHEET 2: SUPPLIER ONLY ----
-    ws_so = wb.create_sheet("Supplier Only")
-    so_cols = ['Phone_Display', 'Sup_Date', 'Package', 'Sup_TxID', 'CBD', 'Net_Total', 'Cust_Name', 'Reason']
-    so_display = result['sup_only'][[c for c in so_cols if c in result['sup_only'].columns]].copy() if len(result['sup_only']) > 0 else pd.DataFrame()
-    if len(so_display) > 0:
-        rename = {'Phone_Display': 'Phone', 'Sup_Date': 'Supplier Date', 'Sup_TxID': 'Supplier Tx ID',
-                  'CBD': 'CBD (NIS)', 'Net_Total': 'Net Total (NIS)', 'Cust_Name': 'Customer Name'}
-        so_display.rename(columns=rename, inplace=True)
-
-    ncols_so = max(len(so_display.columns) + 1, 9) if len(so_display) else 9
-    ttl(ws_so, f"❌  SUPPLIER ONLY — {t['sup_only_count']} phones  |  CBD: {t['sup_only_cbd']:,.2f} NIS", ncols_so, RED)
-    ws_so.merge_cells(f'A2:{get_column_letter(ncols_so)}2')
-    ws_so['A2'].value = "ℹ️  Phones billed by supplier but NOT found in our system (DONE/CANCELLED). Possible date shift or missing transaction."
-    ws_so['A2'].font = Font(color=RED, size=9, name='Arial')
-    ws_so['A2'].fill = PatternFill('solid', start_color=LRED)
-    ws_so['A2'].alignment = Alignment(horizontal='left', vertical='center', wrap_text=True)
-    ws_so['A2'].border = bd()
-    ws_so.row_dimensions[2].height = 24
-
-    if len(so_display) > 0:
-        last_r_so = write_df(ws_so, so_display, 3, RED, LRED, {'CBD (NIS)', 'Net Total (NIS)'})
-        # Total row
-        tr = last_r_so
-        for ci, col in enumerate(so_display.columns, 1):
-            cell = ws_so.cell(row=tr, column=ci)
-            if col == 'Phone': cell.value = 'TOTAL'
-            elif col == 'CBD (NIS)': cell.value = round(so_display['CBD (NIS)'].sum(), 2)
-            H(cell, GREEN)
-            if col == 'CBD (NIS)': cell.number_format = '#,##0.00'
-        # Verified column
-        ver_col = len(so_display.columns) + 1
-        H(ws_so.cell(row=3, column=ver_col, value='Verified ✓'), YELL, fg='000000')
-        for ri in range(len(so_display)):
-            r = ri + 4
-            vc = ws_so.cell(row=r, column=ver_col, value='⬜ Not Verified')
-            vc.font = Font(bold=True, color='7F6000', size=9, name='Arial')
-            vc.fill = PatternFill('solid', start_color=YELL)
-            vc.alignment = Alignment(horizontal='center', vertical='center')
-            vc.border = bd()
+    # Action Required sheet
+    ws_act = wb.create_sheet("Action Required")
+    action_rows = []
+    if len(result.get('sup_only', pd.DataFrame())) > 0:
+        for _, r in result['sup_only'].iterrows():
+            action_rows.append({
+                'Side': 'Supplier Only',
+                'Phone': r.get('Phone_Display', r.get('phone_norm','')),
+                'Date': str(r.get('Sup_Date', r.get('sup_date',''))),
+                'Product': r.get('Package', r.get('TOPUP_ITEM','')),
+                'Amount (NIS)': r.get('CBD', r.get('TOPUP_PRICE',0)),
+                'What to check': r.get('Check_Instruction',''),
+                'Verified': '⬜ Not checked',
+            })
+    if len(result.get('our_only', pd.DataFrame())) > 0:
+        for _, r in result['our_only'].iterrows():
+            action_rows.append({
+                'Side': 'Our Only',
+                'Phone': r.get('Phone_Display',''),
+                'Date': r.get('Date & Time',''),
+                'Product': r.get('Product Name',''),
+                'Amount (NIS)': r.get('End User Price',0),
+                'What to check': r.get('Check_Instruction',''),
+                'Verified': '⬜ Not checked',
+            })
+    action_df = pd.DataFrame(action_rows) if action_rows else pd.DataFrame(
+        columns=['Side','Phone','Date','Product','Amount (NIS)','What to check','Verified'])
+    write_sheet(ws_act, f"ACTION REQUIRED — {report_date} — {tab_name}",
+                action_df, RED, LRED, {'Amount (NIS)'})
+    if len(action_df) > 0:
+        dv = DataValidation(type="list",
+             formula1='"⬜ Not checked,✅ Found — OK,❌ Not found — investigate"',
+             allow_blank=False, showDropDown=False)
+        ver_col = list(action_df.columns).index('Verified') + 1
         vcl = get_column_letter(ver_col)
-        dv = DataValidation(type="list",
-             formula1='"⬜ Not Verified,✅ Found — date shift confirmed,❌ Not found — investigate"',
-             allow_blank=False, showDropDown=False)
-        dv.sqref = f"{vcl}4:{vcl}{len(so_display)+3}"
-        ws_so.add_data_validation(dv)
+        dv.sqref = f"{vcl}3:{vcl}{len(action_df)+2}"
+        ws_act.add_data_validation(dv)
 
-    ws_so.column_dimensions['A'].width = 16
-    ws_so.column_dimensions['B'].width = 18
-    ws_so.column_dimensions['C'].width = 22
-    ws_so.freeze_panes = 'A4'
+    # Matched sheet
+    if len(result.get('matched', pd.DataFrame())) > 0:
+        ws_m = wb.create_sheet("Matched")
+        num_m = {c for c in result['matched'].columns if 'NIS' in c or 'Price' in c or 'Diff' in c}
+        write_sheet(ws_m, f"MATCHED — {t.get('matched_count',0)} records", result['matched'],
+                    NAVY, LBLUE, num_m)
 
-    # ---- SHEET 3: OUR SYSTEM ONLY ----
-    ws_oo = wb.create_sheet("Our System Only")
-    oo_cols = ['Phone_Display', 'Date & Time', 'Transaction ID', 'Operator', 'Eff_Status', 'Product Name', 'End User Price', 'Customer name', 'Reason']
-    oo_display = result['our_only'][[c for c in oo_cols if c in result['our_only'].columns]].copy() if len(result['our_only']) > 0 else pd.DataFrame()
-    if len(oo_display) > 0:
-        rename = {'Phone_Display': 'Phone', 'Transaction ID': 'Our Tx ID', 'Eff_Status': 'Status',
-                  'End User Price': 'End User Price (NIS)', 'Customer name': 'Customer Name'}
-        oo_display.rename(columns=rename, inplace=True)
-
-    ncols_oo = max(len(oo_display.columns) + 1, 9) if len(oo_display) else 9
-    ttl(ws_oo, f"⚠️  OUR SYSTEM ONLY — {t['our_only_count']} phones  |  EUP: {t['our_only_eup']:,.2f} NIS", ncols_oo, ORANGE)
-    ws_oo.merge_cells(f'A2:{get_column_letter(ncols_oo)}2')
-    ws_oo['A2'].value = "ℹ️  DONE in our system but missing from supplier. Late transactions (after 22:00) typically appear in next day's supplier file."
-    ws_oo['A2'].font = Font(color=ORANGE, size=9, name='Arial')
-    ws_oo['A2'].fill = PatternFill('solid', start_color=LORAN)
-    ws_oo['A2'].alignment = Alignment(horizontal='left', vertical='center', wrap_text=True)
-    ws_oo['A2'].border = bd()
-    ws_oo.row_dimensions[2].height = 24
-
-    if len(oo_display) > 0:
-        last_r_oo = write_df(ws_oo, oo_display, 3, ORANGE, LORAN, {'End User Price (NIS)'})
-        tr = last_r_oo
-        for ci, col in enumerate(oo_display.columns, 1):
-            cell = ws_oo.cell(row=tr, column=ci)
-            if col == 'Phone': cell.value = 'TOTAL'
-            elif col == 'End User Price (NIS)': cell.value = round(oo_display['End User Price (NIS)'].sum(), 2)
-            H(cell, GREEN)
-            if col == 'End User Price (NIS)': cell.number_format = '#,##0.00'
-        # Color late rows orange
-        if 'Reason' in oo_display.columns:
-            for ri, (_, row) in enumerate(oo_display.iterrows()):
-                r = ri + 4
-                if 'Late' in str(row.get('Reason', '')):
-                    for ci in range(1, len(oo_display.columns) + 1):
-                        cell = ws_oo.cell(row=r, column=ci)
-                        cell.fill = PatternFill('solid', start_color='FFF2CC')
-        ver_col = len(oo_display.columns) + 1
-        H(ws_oo.cell(row=3, column=ver_col, value='Verified ✓'), YELL, fg='000000')
-        for ri in range(len(oo_display)):
-            r = ri + 4
-            vc = ws_oo.cell(row=r, column=ver_col, value='⬜ Not Verified')
-            vc.font = Font(bold=True, color='7F6000', size=9, name='Arial')
-            vc.fill = PatternFill('solid', start_color=YELL)
-            vc.alignment = Alignment(horizontal='center', vertical='center')
-            vc.border = bd()
-        vcl = get_column_letter(ver_col)
-        dv = DataValidation(type="list",
-             formula1='"⬜ Not Verified,✅ Found in next day supplier report,❌ Not found — investigate"',
-             allow_blank=False, showDropDown=False)
-        dv.sqref = f"{vcl}4:{vcl}{len(oo_display)+3}"
-        ws_oo.add_data_validation(dv)
-
-    ws_oo.column_dimensions['A'].width = 16
-    ws_oo.column_dimensions['B'].width = 18
-    ws_oo.freeze_panes = 'A4'
-
-    # ---- SHEET 4: MATCHED ----
-    ws_m = wb.create_sheet("Matched")
-    num_cols_m = {'Supplier CBD (NIS)', 'Our EUP (NIS)', 'Difference (NIS)'}
-    if len(result['matched']) > 0:
-        ttl(ws_m, f"✅  MATCHED — {len(result['matched'])} records  |  CBD: {t['sup_cbd']:,.2f} NIS  |  EUP: {t['our_eup']:,.2f} NIS  |  Diff: {t['diff']:,.2f} NIS",
-            len(result['matched'].columns), NAVY)
-        last_r_m = write_df(ws_m, result['matched'], 2, NAVY, LBLUE, num_cols_m)
-        tr = last_r_m
-        for ci, col in enumerate(result['matched'].columns, 1):
-            cell = ws_m.cell(row=tr, column=ci)
-            if col == 'Supplier Tx ID': cell.value = 'TOTAL'
-            elif col in num_cols_m: cell.value = round(result['matched'][col].sum(), 2)
-            H(cell, GREEN)
-            if col in num_cols_m: cell.number_format = '#,##0.00'
-        diff_col = list(result['matched'].columns).index('Difference (NIS)') + 1
-        for ri in range(len(result['matched'])):
-            r = ri + 3
-            diff_val = result['matched'].iloc[ri]['Difference (NIS)']
-            if abs(diff_val) > 0.01:
-                cell = ws_m.cell(row=r, column=diff_col)
-                cell.font = Font(bold=True, color=RED if diff_val > 0 else GREEN, size=9, name='Arial')
-    else:
-        ttl(ws_m, "✅  MATCHED — No data", 12, NAVY)
-
-    for ci, w in enumerate([16, 14, 24, 14, 18, 16, 16, 10, 12, 26, 18, 16], 1):
-        ws_m.column_dimensions[get_column_letter(ci)].width = w
-    ws_m.freeze_panes = 'A3'
-
-    # ---- SHEET 5: SUPPLIER vs PENDING ----
-    ws_sp = wb.create_sheet("Supplier vs Pending")
-    sp_display = result['sup_pending'][['Phone_Display', 'Sup_Date', 'Package', 'Sup_TxID', 'CBD']].copy() if len(result['sup_pending']) > 0 else pd.DataFrame()
-    if len(sp_display) > 0:
-        sp_display.rename(columns={'Phone_Display': 'Phone', 'Sup_Date': 'Supplier Date',
-                                    'Sup_TxID': 'Supplier Tx ID', 'CBD': 'CBD (NIS)'}, inplace=True)
-    ttl(ws_sp, f"🔄  SUPPLIER BILLED / WE HAVE PENDING — {t['sup_pending_count']} records  |  {t['sup_pending_cbd']:,.2f} NIS", 7, PURPLE)
-    ws_sp.merge_cells('A2:G2')
-    ws_sp['A2'].value = "ℹ️  Supplier already charged these phones but our system shows PENDING_CANCELLATION. Verify: did cancellation go through?"
-    ws_sp['A2'].font = Font(color=PURPLE, size=9, name='Arial')
-    ws_sp['A2'].fill = PatternFill('solid', start_color=LPURP)
-    ws_sp['A2'].alignment = Alignment(horizontal='left', vertical='center', wrap_text=True)
-    ws_sp['A2'].border = bd()
-    ws_sp.row_dimensions[2].height = 24
-    if len(sp_display) > 0:
-        write_df(ws_sp, sp_display, 3, PURPLE, LPURP, {'CBD (NIS)'})
-    ws_sp.freeze_panes = 'A4'
-
-    # ---- SHEET 6: PENDING ----
-    ws_pnd = wb.create_sheet("Pending Cancellation")
-    pnd_cols = ['Phone_Display', 'Date & Time', 'Transaction ID', 'Operator', 'Eff_Status', 'Product Name', 'End User Price', 'Customer price', 'Customer name']
-    pnd_display = result['pending'][[c for c in pnd_cols if c in result['pending'].columns]].copy() if len(result['pending']) > 0 else pd.DataFrame()
-    if len(pnd_display) > 0:
-        pnd_display.rename(columns={'Phone_Display': 'Phone', 'Transaction ID': 'Our Tx ID',
-                                    'Eff_Status': 'Status', 'End User Price': 'End User Price (NIS)',
-                                    'Customer price': 'Customer Price (NIS)', 'Customer name': 'Customer Name'}, inplace=True)
-    ttl(ws_pnd, f"🕐  PENDING CANCELLATION — {t['pending_count']} record(s)  |  EUP: {t['pending_eup']:,.2f} NIS",
-        max(len(pnd_display.columns) + 1, 10) if len(pnd_display) else 10, PURPLE)
-    ws_pnd.merge_cells(f'A2:{get_column_letter(10)}2')
-    ws_pnd['A2'].value = "ℹ️  Check next day: did supplier send REFUND (approved) or back to DONE (rejected)? Update Verified column."
-    ws_pnd['A2'].font = Font(color=PURPLE, size=9, name='Arial')
-    ws_pnd['A2'].fill = PatternFill('solid', start_color=LPURP)
-    ws_pnd['A2'].alignment = Alignment(horizontal='left', vertical='center')
-    ws_pnd['A2'].border = bd()
-    ws_pnd.row_dimensions[2].height = 20
-    if len(pnd_display) > 0:
-        ncols_pnd = len(pnd_display.columns) + 1
-        write_df(ws_pnd, pnd_display, 3, PURPLE, LPURP, {'End User Price (NIS)', 'Customer Price (NIS)'})
-        H(ws_pnd.cell(row=3, column=ncols_pnd, value='Verified ✓'), YELL, fg='000000')
-        for ri in range(len(pnd_display)):
-            r = ri + 4
-            vc = ws_pnd.cell(row=r, column=ncols_pnd, value='⬜ Not Verified')
-            vc.font = Font(bold=True, color='7F6000', size=9, name='Arial')
-            vc.fill = PatternFill('solid', start_color=YELL)
-            vc.alignment = Alignment(horizontal='center', vertical='center')
-            vc.border = bd()
-        vcl = get_column_letter(ncols_pnd)
-        dv = DataValidation(type="list",
-             formula1='"⬜ Not Verified,✅ Confirmed REFUND — cancellation approved,🔄 Back to DONE — cancellation rejected"',
-             allow_blank=False, showDropDown=False)
-        dv.sqref = f"{vcl}4:{vcl}{len(pnd_display)+3}"
-        ws_pnd.add_data_validation(dv)
-    ws_pnd.freeze_panes = 'A4'
-
-    # ---- SHEET 7: REFUNDS ----
-    ws_ref = wb.create_sheet("Refunds")
-    ref_cols = ['Operator', 'Phone_Display', 'Date & Time', 'Transaction ID', 'Product Name', 'End User Price', 'Customer price']
-    ref_display = result['refunds'][[c for c in ref_cols if c in result['refunds'].columns]].copy() if len(result['refunds']) > 0 else pd.DataFrame()
-    if len(ref_display) > 0:
-        ref_display.rename(columns={'Phone_Display': 'Phone', 'Transaction ID': 'Our Tx ID',
-                                    'End User Price': 'End User Price (NIS)', 'Customer price': 'Customer Price (NIS)'}, inplace=True)
-    ttl(ws_ref, f"↩️  REFUNDS — Previous Period  |  {t['refunds_count']} records  |  EUP: {t['refunds_eup']:,.2f} NIS",
-        max(len(ref_display.columns), 7) if len(ref_display) else 7, TEAL)
-    if len(ref_display) > 0:
-        write_df(ws_ref, ref_display, 2, TEAL, LTEAL, {'End User Price (NIS)', 'Customer Price (NIS)'})
-    ws_ref.freeze_panes = 'A3'
-
-    # ---- SHEET 8: FAILED ----
-    ws_f = wb.create_sheet("Failed")
-    fail_cols = ['Operator', 'Phone_Display', 'Date & Time', 'Transaction ID', 'Product Name', 'End User Price', 'Error description']
-    fail_display = result['failed'][[c for c in fail_cols if c in result['failed'].columns]].copy() if len(result['failed']) > 0 else pd.DataFrame()
-    if len(fail_display) > 0:
-        fail_display.rename(columns={'Phone_Display': 'Phone', 'Transaction ID': 'Our Tx ID',
-                                    'End User Price': 'End User Price (NIS)', 'Error description': 'Error Description'}, inplace=True)
-    ttl(ws_f, f"🔴  FAILED TRANSACTIONS — {t['failed_count']} records",
-        max(len(fail_display.columns), 7) if len(fail_display) else 7, '7F0000')
-    if len(fail_display) > 0:
-        write_df(ws_f, fail_display, 2, '7F0000', LRED)
-    ws_f.freeze_panes = 'A3'
+    # Refunds sheet
+    if len(result.get('refunds', pd.DataFrame())) > 0:
+        ws_r = wb.create_sheet("Refunds")
+        ref = result['refunds']
+        show_cols = [c for c in ['Operator','Phone_Display','Date & Time','Product Name','End User Price'] if c in ref.columns]
+        write_sheet(ws_r, f"REFUNDS — {t.get('refunds_count',0)} records",
+                    ref[show_cols], TEAL, LTEAL, {'End User Price'})
 
     buf = BytesIO()
     wb.save(buf)
     buf.seek(0)
     return buf
 
-# ============================================================
-# MONTHLY EXCEL EXPORT
-# ============================================================
 def create_monthly_excel(history, month_label):
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -825,62 +1618,52 @@ def create_monthly_excel(history, month_label):
         cell.fill = PatternFill('solid', start_color=bg)
         cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
         cell.border = bd()
-    def D(cell, bg='FFFFFF', align='center', fmt=None):
+    def D(cell, bg='FFFFFF', fmt=None):
         cell.font = Font(size=9, name='Arial')
         cell.fill = PatternFill('solid', start_color=bg)
-        cell.alignment = Alignment(horizontal=align, vertical='center')
+        cell.alignment = Alignment(horizontal='center', vertical='center')
         cell.border = bd()
         if fmt: cell.number_format = fmt
 
-    NAVY = '1F3864'; LBLUE = 'DEEAF1'; GREEN = '375623'; WHITE = 'FFFFFF'; RED = 'C00000'
+    NAVY='1F3864'; LBLUE='DEEAF1'; GREEN='375623'; WHITE='FFFFFF'
 
-    ws.merge_cells('A1:K1')
-    ws['A1'].value = f"📅  MONTHLY SUMMARY — {month_label}"
+    ws.merge_cells('A1:H1')
+    ws['A1'].value = f"MONTHLY SUMMARY — {month_label}"
     ws['A1'].font = Font(bold=True, color='FFFFFF', size=14, name='Arial')
     ws['A1'].fill = PatternFill('solid', start_color=NAVY)
     ws['A1'].alignment = Alignment(horizontal='center', vertical='center')
     ws['A1'].border = bd()
     ws.row_dimensions[1].height = 36
 
-    headers = ['Date', 'Supplier CBD (NIS)', 'Our EUP (NIS)', 'Difference (NIS)',
-               'Matched', 'Supplier Only', 'Supplier Only CBD', 'Our Only', 'Our Only EUP',
-               'Real Gap (NIS)', 'Net Billed (NIS)']
+    headers = ['Date', 'Operator', 'Matched', 'Supplier Total (NIS)',
+               'Our EUP (NIS)', 'Diff (NIS)', 'Refunds (NIS)', 'Net Billed (NIS)']
     for ci, h in enumerate(headers, 1):
         H(ws.cell(row=2, column=ci, value=h), NAVY)
-    ws.row_dimensions[2].height = 35
+    ws.row_dimensions[2].height = 30
 
     for ri, rec in enumerate(history):
         r = ri + 3
-        bg = LBLUE if ri % 2 == 0 else WHITE
-        vals = [
-            rec.get('date', ''),
-            rec.get('sup_cbd', 0),
-            rec.get('our_eup', 0),
-            rec.get('diff', 0),
-            rec.get('matched_count', 0),
-            rec.get('sup_only_count', 0),
-            rec.get('sup_only_cbd', 0),
-            rec.get('our_only_count', 0),
-            rec.get('our_only_eup', 0),
-            rec.get('real_gap', 0),
-            rec.get('net_billed', 0),
-        ]
+        bg = LBLUE if ri%2==0 else WHITE
+        vals = [rec.get('date',''), rec.get('operator_tab',''),
+                rec.get('matched_count',0), rec.get('sup_cbd',0),
+                rec.get('our_eup',0), rec.get('diff',0),
+                rec.get('refunds_eup',0), rec.get('net_billed',0)]
         for ci, val in enumerate(vals, 1):
             cell = ws.cell(row=r, column=ci, value=val)
-            D(cell, bg, fmt='#,##0.00' if ci in [2, 3, 4, 7, 9, 10, 11] else None)
-            if ci == 10 and isinstance(val, (int, float)) and abs(val) > 0.01:
-                cell.font = Font(bold=True, color=RED if val > 0 else GREEN, size=9, name='Arial')
+            D(cell, bg, fmt='#,##0.00' if ci >= 4 else None)
         ws.row_dimensions[r].height = 18
 
     tr = len(history) + 3
-    for ci, val in enumerate(
-        ['TOTAL MONTH'] + [f'=SUM({get_column_letter(c)}3:{get_column_letter(c)}{tr-1})' for c in range(2, 12)], 1):
-        cell = ws.cell(row=tr, column=ci, value=val)
+    ws.cell(row=tr, column=1, value='TOTAL').font = Font(bold=True, color='FFFFFF', size=11, name='Arial')
+    for ci in range(1, 9):
+        cell = ws.cell(row=tr, column=ci)
+        if ci >= 4:
+            cell.value = f'=SUM({get_column_letter(ci)}3:{get_column_letter(ci)}{tr-1})'
         H(cell, GREEN, sz=11)
-        if ci > 1: cell.number_format = '#,##0.00'
+        if ci >= 4: cell.number_format = '#,##0.00'
     ws.row_dimensions[tr].height = 24
 
-    for ci, w in enumerate([14, 18, 16, 16, 12, 14, 18, 12, 16, 18, 18], 1):
+    for ci, w in enumerate([14,12,10,20,18,16,16,18], 1):
         ws.column_dimensions[get_column_letter(ci)].width = w
     ws.freeze_panes = 'A3'
 
@@ -888,431 +1671,6 @@ def create_monthly_excel(history, month_label):
     wb.save(buf)
     buf.seek(0)
     return buf
-
-# ============================================================
-# MAIN APP
-# ============================================================
-def main():
-    st.markdown("""
-    <div class="main-header">
-        <h1 style="margin:0; font-size:28px;">📊 Reconciliation Dashboard</h1>
-        <p style="margin:5px 0 0 0; opacity:0.85; font-size:14px;">Supplier vs Our System (Partner + 012Talk)</p>
-    </div>
-    """, unsafe_allow_html=True)
-
-    with st.sidebar:
-        st.markdown("### 📋 Navigation")
-        page = st.radio("Navigation Menu", ["🔄 Daily Reconciliation", "📅 Monthly Summary", "ℹ️ Instructions"],
-                        label_visibility="collapsed")
-        st.markdown("---")
-        st.markdown("### 📊 History")
-        sh = get_spreadsheet()
-        if sh is not None:
-            st.success("✅ Google Sheets connected")
-        else:
-            st.warning("⚠️ Sheets not connected")
-        history = load_history()
-        if history:
-            st.success(f"✅ {len(history)} days recorded")
-            last = history[-1]
-            st.info(f"Last: {last.get('date', 'N/A')}")
-        else:
-            st.info("No history yet")
-
-    # ============================================================
-    # PAGE: DAILY RECONCILIATION
-    # ============================================================
-    if page == "🔄 Daily Reconciliation":
-        st.markdown("## 🔄 Daily Reconciliation")
-
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.markdown("**1️⃣ Supplier File (.xls)**")
-            sup_file = st.file_uploader("Supplier file", type=['xls', 'xlsx', 'csv'],
-                                        label_visibility="collapsed", key="sup")
-            st.caption("Supplier report — Charge Before Discount (col M)")
-        with col2:
-            st.markdown("**2️⃣ Partner File (.csv)**")
-            part_file = st.file_uploader("Partner file", type=['csv', 'xlsx'],
-                                         label_visibility="collapsed", key="part")
-            st.caption("Our system export — Partner operator")
-        with col3:
-            st.markdown("**3️⃣ 012Talk File (.csv)**")
-            talk_file = st.file_uploader("012Talk file", type=['csv', 'xlsx'],
-                                         label_visibility="collapsed", key="talk")
-            st.caption("Our system export — 012Talk operator")
-
-        report_date = st.date_input("📅 Report Date", value=date.today())
-
-        if sup_file and part_file and talk_file:
-            if st.button("▶ Run Reconciliation", type="primary", use_container_width=True):
-                with st.spinner("Processing reconciliation..."):
-                    sup_df,  err1 = load_supplier(sup_file.read(), sup_file.name)
-                    part_df, err2 = load_our(part_file.read(), 'Partner')
-                    talk_df, err3 = load_our(talk_file.read(), '012Talk')
-
-                    if err1: st.error(f"❌ Supplier file error: {err1}"); return
-                    if err2: st.error(f"❌ Partner file error: {err2}"); return
-                    if err3: st.error(f"❌ 012Talk file error: {err3}"); return
-
-                    auto_date = str(report_date)
-                    if sup_df is not None and 'Sup_Date' in sup_df.columns and len(sup_df) > 0:
-                        try:
-                            parsed = pd.to_datetime(sup_df['Sup_Date'].iloc[0], dayfirst=True)
-                            auto_date = parsed.strftime('%Y-%m-%d')
-                            st.info(f"📅 Date auto-detected from supplier file: **{auto_date}**")
-                        except:
-                            pass
-
-                    result = run_reconciliation(sup_df, part_df, talk_df)
-                    st.session_state['result'] = result
-                    st.session_state['report_date'] = auto_date
-
-                    # Cross-day matching
-                    shifts_our, shifts_sup = cross_day_match(result, auto_date)
-                    st.session_state['shifts_our'] = shifts_our
-                    st.session_state['shifts_sup'] = shifts_sup
-
-                    st.success("✅ Reconciliation complete!")
-
-        # ---- RESULTS ----
-        if 'result' in st.session_state:
-            result = st.session_state['result']
-            t = result['totals']
-            report_date_str = st.session_state.get('report_date', str(date.today()))
-
-            st.markdown("---")
-            st.markdown("### 📊 Transaction Count Discrepancy")
-
-            # Cross-day shift banner
-            shifts_our = st.session_state.get('shifts_our', [])
-            shifts_sup = st.session_state.get('shifts_sup', [])
-            if shifts_our:
-                st.success(f"✅ Date Shift Confirmed: {len(shifts_our)} phone(s) from 'Our Only' found in yesterday's 'Supplier Only' — these are normal date shifts: {', '.join(shifts_our)}")
-            if shifts_sup:
-                st.success(f"✅ Date Shift Confirmed: {len(shifts_sup)} phone(s) from 'Supplier Only' found in yesterday's 'Our Only' — normal date shifts: {', '.join(shifts_sup)}")
-
-            # Top metrics — focus on counts and real gap
-            col1, col2, col3, col4, col5 = st.columns(5)
-            with col1:
-                st.metric("✅ Matched", f"{t['matched_count']:,}",
-                          delta="OK" if t['matched_count'] > 0 else None)
-            with col2:
-                st.metric("❌ Supplier Only", t['sup_only_count'],
-                          delta=f"−{t['sup_only_cbd']:,.2f} NIS" if t['sup_only_count'] > 0 else "0",
-                          delta_color="inverse")
-            with col3:
-                st.metric("⚠️ Our Only", t['our_only_count'],
-                          delta=f"−{t['our_only_eup']:,.2f} NIS" if t['our_only_count'] > 0 else "0",
-                          delta_color="inverse")
-            with col4:
-                st.metric("🔄 Sup vs Pending", t['sup_pending_count'],
-                          delta=f"{t['sup_pending_cbd']:,.2f} NIS" if t['sup_pending_count'] > 0 else "0",
-                          delta_color="off")
-            with col5:
-                gap = t['real_gap']
-                gap_label = f"+{gap:,.2f} NIS (sup higher)" if gap > 0 else (f"{gap:,.2f} NIS (we higher)" if gap < 0 else "0.00 NIS")
-                st.metric("📊 Real Gap", gap_label,
-                          delta="Supplier Only CBD − Our Only EUP",
-                          delta_color="inverse" if gap > 0 else ("normal" if gap < 0 else "off"))
-
-            st.markdown("---")
-
-            # ---- TABS ----
-            tabs = st.tabs([
-                f"❌ Supplier Only ({t['sup_only_count']})",
-                f"⚠️ Our System Only ({t['our_only_count']})",
-                f"🔄 Sup vs Pending ({t['sup_pending_count']})",
-                f"✅ Matched ({t['matched_count']})",
-                f"🕐 Pending ({t['pending_count']})",
-                f"↩️ Refunds ({t['refunds_count']})",
-                f"🔴 Failed ({t['failed_count']})",
-            ])
-
-            # TAB 1 — SUPPLIER ONLY
-            with tabs[0]:
-                st.markdown("**Phones billed by supplier — NOT found in our system**")
-                st.caption(f"Total CBD: **{t['sup_only_cbd']:,.2f} NIS** — these are charges you may owe but can't verify")
-                if len(result['sup_only']) > 0:
-                    display_cols = ['Phone_Display', 'Sup_Date', 'Package', 'Sup_TxID', 'CBD', 'Cust_Name', 'Reason']
-                    show = result['sup_only'][[c for c in display_cols if c in result['sup_only'].columns]].copy()
-                    show.rename(columns={'Phone_Display': 'Phone', 'Sup_Date': 'Date',
-                                         'Sup_TxID': 'Supplier Tx ID', 'CBD': 'CBD (NIS)',
-                                         'Cust_Name': 'Customer Name'}, inplace=True)
-                    st.dataframe(show, use_container_width=True, hide_index=True)
-                    st.info(f"📋 Total: {len(show)} phones | {t['sup_only_cbd']:,.2f} NIS")
-                else:
-                    st.success("✅ No supplier-only records — perfect match on transaction count!")
-
-            # TAB 2 — OUR ONLY
-            with tabs[1]:
-                st.markdown("**Phones in our system — NOT found in supplier report**")
-                st.caption(f"Total EUP: **{t['our_only_eup']:,.2f} NIS** — transactions supplier didn't list (often late-night date shifts)")
-                if len(result['our_only']) > 0:
-                    display_cols = ['Phone_Display', 'Date & Time', 'Operator', 'Product Name', 'End User Price', 'Eff_Status', 'Reason']
-                    show = result['our_only'][[c for c in display_cols if c in result['our_only'].columns]].copy()
-                    show.rename(columns={'Phone_Display': 'Phone', 'End User Price': 'EUP (NIS)',
-                                         'Eff_Status': 'Status'}, inplace=True)
-
-                    # Highlight late transactions
-                    late_count = result['our_only'].get('Is_Late', pd.Series(dtype=bool)).sum() if 'Is_Late' in result['our_only'].columns else 0
-                    if late_count > 0:
-                        st.warning(f"⏰ {late_count} transaction(s) after 22:00 — likely to appear in tomorrow's supplier report")
-
-                    st.dataframe(show, use_container_width=True, hide_index=True)
-                    st.info(f"📋 Total: {len(show)} phones | {t['our_only_eup']:,.2f} NIS")
-                else:
-                    st.success("✅ No our-only records — supplier listed everything!")
-
-            # TAB 3 — SUPPLIER vs PENDING
-            with tabs[2]:
-                st.markdown("**Supplier already charged — we show PENDING_CANCELLATION**")
-                st.caption("These phones: supplier billed them, but our system thinks cancellation is pending. Needs verification.")
-                if len(result['sup_pending']) > 0:
-                    display_cols = ['Phone_Display', 'Sup_Date', 'Package', 'Sup_TxID', 'CBD']
-                    show = result['sup_pending'][[c for c in display_cols if c in result['sup_pending'].columns]].copy()
-                    show.rename(columns={'Phone_Display': 'Phone', 'Sup_Date': 'Supplier Date',
-                                         'Sup_TxID': 'Supplier Tx ID', 'CBD': 'CBD (NIS)'}, inplace=True)
-                    st.dataframe(show, use_container_width=True, hide_index=True)
-                    st.warning(f"⚠️ {t['sup_pending_count']} phone(s) | {t['sup_pending_cbd']:,.2f} NIS — check if cancellation was processed")
-                else:
-                    st.success("✅ No supplier vs pending conflicts!")
-
-            # TAB 4 — MATCHED
-            with tabs[3]:
-                st.markdown("**Phones matched in both systems (DONE/CANCELLED)**")
-                if len(result['matched']) > 0:
-                    st.dataframe(result['matched'], use_container_width=True, hide_index=True)
-                    col1, col2, col3 = st.columns(3)
-                    col1.metric("Supplier CBD", f"{t['sup_cbd']:,.2f} NIS")
-                    col2.metric("Our EUP", f"{t['our_eup']:,.2f} NIS")
-                    col3.metric("Difference", f"{t['diff']:,.2f} NIS",
-                                delta="OK" if abs(t['diff']) < 0.01 else "Check amounts")
-                else:
-                    st.info("No matched records")
-
-            # TAB 5 — PENDING
-            with tabs[4]:
-                if len(result['pending']) > 0:
-                    st.warning(f"⚠️ {t['pending_count']} transaction(s) pending. Check next day!")
-                    display_cols = ['Phone_Display', 'Date & Time', 'Transaction ID', 'Operator', 'Product Name', 'End User Price']
-                    show = result['pending'][[c for c in display_cols if c in result['pending'].columns]].copy()
-                    show.rename(columns={'Phone_Display': 'Phone', 'End User Price': 'EUP (NIS)'}, inplace=True)
-                    st.dataframe(show, use_container_width=True, hide_index=True)
-                else:
-                    st.success("✅ No pending transactions!")
-
-            # TAB 6 — REFUNDS
-            with tabs[5]:
-                if len(result['refunds']) > 0:
-                    st.info(f"↩️ {t['refunds_count']} refunds — {t['refunds_eup']:,.2f} NIS credit (arrive end of month)")
-                    display_cols = ['Operator', 'Phone_Display', 'Date & Time', 'Product Name', 'End User Price']
-                    show = result['refunds'][[c for c in display_cols if c in result['refunds'].columns]].copy()
-                    show.rename(columns={'Phone_Display': 'Phone', 'End User Price': 'EUP (NIS)'}, inplace=True)
-                    st.dataframe(show, use_container_width=True, hide_index=True)
-                else:
-                    st.info("No refunds today")
-
-            # TAB 7 — FAILED
-            with tabs[6]:
-                if len(result['failed']) > 0:
-                    st.error(f"🔴 {t['failed_count']} failed transactions")
-                    display_cols = ['Operator', 'Phone_Display', 'Date & Time', 'Product Name', 'Error description']
-                    show = result['failed'][[c for c in display_cols if c in result['failed'].columns]].copy()
-                    show.rename(columns={'Phone_Display': 'Phone'}, inplace=True)
-                    st.dataframe(show, use_container_width=True, hide_index=True)
-                else:
-                    st.success("✅ No failed transactions!")
-
-            # ---- NET BILLING SUMMARY ----
-            st.markdown("---")
-            st.markdown("### 💰 Net Billing Summary")
-            net_data = {
-                'Item': [
-                    'Our EUP — DONE+CANCELLED',
-                    'Refunds — credit back (prev. period)',
-                    'PENDING (unconfirmed)',
-                    'NET Our System Total (excl. PENDING)',
-                    'Supplier CBD — matched phones',
-                    'Supplier CBD — supplier only phones',
-                    '📊 REAL GAP (Supplier Only − Our Only)',
-                ],
-                'Partner (NIS)': [
-                    round(t['partner_eup'], 2), round(t['partner_ref'], 2),
-                    round(t['pending_eup'], 2), round(t['partner_eup'] + t['partner_ref'], 2),
-                    '—', '—', '—'
-                ],
-                '012Talk (NIS)': [
-                    round(t['talk012_eup'], 2), round(t['talk012_ref'], 2),
-                    0, round(t['talk012_eup'] + t['talk012_ref'], 2),
-                    '—', '—', '—'
-                ],
-                'TOTAL (NIS)': [
-                    round(t['partner_eup'] + t['talk012_eup'], 2),
-                    round(t['partner_ref'] + t['talk012_ref'], 2),
-                    round(t['pending_eup'], 2),
-                    round(t['partner_eup'] + t['talk012_eup'] + t['partner_ref'] + t['talk012_ref'], 2),
-                    round(t['sup_cbd'], 2),
-                    round(t['sup_only_cbd'], 2),
-                    round(t['real_gap'], 2),
-                ],
-            }
-            st.dataframe(pd.DataFrame(net_data), use_container_width=True, hide_index=True)
-
-            # ---- DOWNLOAD & SAVE ----
-            st.markdown("---")
-            col1, col2 = st.columns(2)
-            with col1:
-                excel_buf = create_excel_report(result, report_date_str)
-                st.download_button(
-                    label="📥 Download Excel Report",
-                    data=excel_buf,
-                    file_name=f"Reconciliation_{report_date_str.replace('-', '_')}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True,
-                    type="primary"
-                )
-            with col2:
-                if st.button("💾 Save to Monthly History", use_container_width=True):
-                    record = {
-                        'date':             report_date_str,
-                        'sup_cbd':          round(t['sup_cbd'], 2),
-                        'our_eup':          round(t['our_eup'], 2),
-                        'diff':             round(t['diff'], 2),
-                        'matched_count':    t['matched_count'],
-                        'sup_only_count':   t['sup_only_count'],
-                        'sup_only_cbd':     round(t['sup_only_cbd'], 2),
-                        'our_only_count':   t['our_only_count'],
-                        'our_only_eup':     round(t['our_only_eup'], 2),
-                        'real_gap':         round(t['real_gap'], 2),
-                        'pending_count':    t['pending_count'],
-                        'refunds_eup':      round(t['refunds_eup'], 2),
-                        'net_billed':       round(t['partner_eup'] + t['talk012_eup'] + t['partner_ref'] + t['talk012_ref'], 2),
-                    }
-                    ok, msg = save_to_sheets(record)
-                    ok2, msg2 = save_details_to_sheets(report_date_str, result)
-                    if ok:
-                        st.success(f"✅ {msg}")
-                    else:
-                        st.warning(f"⚠️ {msg}")
-                    if ok2:
-                        st.info(f"📋 {msg2}")
-                    else:
-                        st.warning(f"⚠️ Details: {msg2}")
-
-    # ============================================================
-    # PAGE: MONTHLY SUMMARY
-    # ============================================================
-    elif page == "📅 Monthly Summary":
-        st.markdown("## 📅 Monthly Summary")
-
-        # Get available months from Sheets
-        sh = get_spreadsheet()
-        available_months = []
-        if sh is not None:
-            try:
-                for ws in sh.worksheets():
-                    if _is_month_sheet(ws.title):
-                        try:
-                            dt = datetime.strptime(ws.title, '%B %Y')
-                            available_months.append(dt.strftime('%Y-%m'))
-                        except Exception:
-                            pass
-                available_months = sorted(set(available_months), reverse=True)
-            except Exception:
-                pass
-
-        if not available_months:
-            # Fallback to local
-            history = _load_local_history()
-            available_months = sorted(set(h['date'][:7] for h in history), reverse=True)
-
-        if not available_months:
-            st.info("No history yet. Run daily reconciliations and click 'Save to Monthly History'.")
-            return
-
-        selected_month = st.selectbox("Select Month", available_months,
-                                      format_func=lambda m: datetime.strptime(m, '%Y-%m').strftime('%B %Y'))
-        month_history = load_history(month=selected_month)
-
-        if not month_history:
-            st.warning("No data for selected month")
-            return
-
-        total_sup      = sum(h.get('sup_cbd', 0) for h in month_history)
-        total_eup      = sum(h.get('our_eup', 0) for h in month_history)
-        total_gap      = sum(h.get('real_gap', 0) for h in month_history)
-        total_refunds  = sum(h.get('refunds_eup', 0) for h in month_history)
-
-        col1, col2, col3, col4, col5 = st.columns(5)
-        col1.metric("📅 Days Recorded", len(month_history))
-        col2.metric("Supplier CBD (matched)", f"{total_sup:,.2f} NIS")
-        col3.metric("Our EUP (matched)", f"{total_eup:,.2f} NIS")
-        col4.metric("↩️ Total Refunds", f"{total_refunds:,.2f} NIS")
-        col5.metric("📊 Monthly Real Gap", f"{total_gap:,.2f} NIS",
-                    delta="Sup Only − Our Only" ,
-                    delta_color="inverse" if total_gap > 0 else "normal")
-
-        st.markdown("---")
-        df_month = pd.DataFrame(month_history)
-        st.dataframe(df_month, use_container_width=True, hide_index=True)
-
-        month_label = datetime.strptime(selected_month, '%Y-%m').strftime('%B %Y')
-        monthly_buf = create_monthly_excel(month_history, month_label)
-        st.download_button(
-            label=f"📥 Download Monthly Report — {month_label}",
-            data=monthly_buf,
-            file_name=f"Monthly_Summary_{selected_month.replace('-', '_')}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
-            type="primary"
-        )
-
-    # ============================================================
-    # PAGE: INSTRUCTIONS
-    # ============================================================
-    elif page == "ℹ️ Instructions":
-        st.markdown("## ℹ️ How to Use")
-        st.markdown("""
-        ### 📋 Daily Process
-
-        **Step 1 — Upload Files**
-        - Supplier `.xls` file (keep original format — CSV truncates phone numbers!)
-        - Partner `.csv` from our system
-        - 012Talk `.csv` from our system
-
-        **Step 2 — Run Reconciliation**
-        - Select the report date
-        - Click **▶ Run Reconciliation**
-
-        **Step 3 — Review the Gap**
-        - **❌ Supplier Only** — supplier billed these, we have no record. Investigate!
-        - **⚠️ Our Only** — we charged these, supplier didn't list. Often late-night (after 22:00) date shifts — check next day's supplier file.
-        - **🔄 Sup vs Pending** — supplier already billed but we show PENDING. Did cancellation go through?
-        - **📊 Real Gap** = Supplier Only CBD − Our Only EUP. This is your actual financial exposure for the day.
-
-        **Step 4 — Download & Save**
-        - **📥 Download Excel Report** — save to SharePoint. Contains all sheets with phone details.
-        - **💾 Save to Monthly History** — adds daily totals to the monthly tracker.
-
-        ---
-
-        ### 📊 Real Gap Explained
-        | Situation | Meaning |
-        |---|---|
-        | Real Gap = 0 | Every missing phone on one side is balanced by a missing phone on the other |
-        | Real Gap > 0 | Supplier charges more than we see — you may owe money |
-        | Real Gap < 0 | We have more transactions than supplier billed — supplier may owe a correction |
-
-        ---
-
-        ### ⚠️ Important Rules
-        - Always use original `.xls` supplier file — CSV format truncates phone numbers to scientific notation
-        - PENDING_CANCELLATION = check next day if supplier approved (REFUND) or rejected (stays DONE)
-        - REFUND rows = credits from previous period, arrive end of month
-        - REWARD and REFUND_REWARD rows are automatically excluded
-        - Late transactions (after 22:00) often appear in the NEXT day's supplier file — normal
-        """)
 
 
 if __name__ == "__main__":
