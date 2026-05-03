@@ -1,3 +1,4 @@
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -34,8 +35,8 @@ st.set_page_config(
 def load_logo(path, mime):
     # Try multiple locations: repo folder, uploads folder
     candidates = [
-        os.path.join(os.path.dirname(__file__), 'logos', os.path.basename(path)),
-        os.path.join(os.path.dirname(__file__), os.path.basename(path)),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), path),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), os.path.basename(path)),
         path,
     ]
     for p in candidates:
@@ -47,11 +48,11 @@ def load_logo(path, mime):
             continue
     return ""
 
-LOGO_PAYX    = load_logo("/mnt/user-data/uploads/payx_logo.svg", "svg+xml")
-LOGO_PARTNER = load_logo("/mnt/user-data/uploads/logo_partner_internet.png", "png")
-LOGO_012     = load_logo("/mnt/user-data/uploads/012TALK_לוג.png", "png")
-LOGO_PELE    = load_logo("/mnt/user-data/uploads/pelephoen.png", "png")
-LOGO_CELL    = load_logo("/mnt/user-data/uploads/cellcom.png", "png")
+LOGO_PAYX    = load_logo("logos/payx_logo.svg", "svg+xml")
+LOGO_PARTNER = load_logo("logos/partner_logo.png", "png")
+LOGO_012     = load_logo("logos/talk012_logo.png", "png")
+LOGO_PELE    = load_logo("logos/pelephone_logo.png", "png")
+LOGO_CELL    = load_logo("logos/cellcom_logo.png", "png")
 
 # ============================================================
 # STYLES
@@ -813,7 +814,7 @@ def main():
         st.markdown("### 📋 Navigation")
         if LOGO_PAYX:
             st.markdown(f'<img src="{LOGO_PAYX}" style="height:28px;margin-bottom:8px;">', unsafe_allow_html=True)
-        page = st.radio("", [
+        page = st.radio("Select page", [
             "📱 Partner & 012Talk Verification",
             "⭐ Pelephone Verification",
             "📡 Cellcom Verification",
