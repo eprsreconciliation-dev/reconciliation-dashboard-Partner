@@ -681,15 +681,12 @@ def run_recon_pelephone(sup_df, pele_df, global_df, esim_df, report_date):
 # ============================================================
 def render_header(title, subtitle, logos):
     logo_parts = []
-    for i, l in enumerate(logos):
+    for l in logos:
         if not l:
             continue
-        # First logo is PAYXPRESS (keep as-is), rest: apply invert filter for dark logos
-        if i == 0:
-            style = 'height:48px;object-fit:contain;'
-        else:
-            style = 'height:48px;object-fit:contain;filter:brightness(0) invert(1);'
-        logo_parts.append(f'<img src="{l}" style="{style}">')
+        # Partner logo is black — add white rounded background
+        bg = 'background:white;border-radius:6px;padding:3px 6px;' if 'partner' in l.lower() or (len(l) > 100 and l[50:60].count('A') > 3) else ''
+        logo_parts.append(f'<img src="{l}" style="height:48px;object-fit:contain;{bg}">')
     logo_html = ''.join(logo_parts)
     st.markdown(f"""
     <div class="main-header">
@@ -1689,3 +1686,4 @@ def create_monthly_excel(history, month_label):
 
 if __name__ == "__main__":
     main()
+
