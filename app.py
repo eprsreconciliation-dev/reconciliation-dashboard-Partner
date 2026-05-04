@@ -157,6 +157,10 @@ def load_history(month=None, operator_tab=None):
                     try: records.extend(ws.get_all_records())
                     except: pass
             records = sorted(records, key=lambda x: x.get('date',''))
+        # Default old records (no operator_tab) to 'partner'
+        for r in records:
+            if not r.get('operator_tab'):
+                r['operator_tab'] = 'partner'
         if operator_tab:
             records = [r for r in records if r.get('operator_tab','') == operator_tab]
         return records
