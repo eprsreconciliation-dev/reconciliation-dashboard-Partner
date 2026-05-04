@@ -380,6 +380,7 @@ def load_supplier_cellcom(file_bytes):
         df['Phone_Display'] = df['phone_norm'].apply(display_phone)
         df['Sup_Date'] = pd.to_datetime(df['Sup_Date'], errors='coerce')
         df = df[df['phone_norm'].str.len() >= 8]
+        df = df[df['CBD'] > 0]  # Exclude zero-amount (failed attempts)
         return df, None
     except Exception as e: return None, str(e)
 
@@ -566,18 +567,30 @@ def run_recon_cellcom(sup_df, our_df, report_date):
     matched_df = pd.DataFrame(matched_rows)
 
     # Cellcom price analysis
-    total_expected_diff = sum(
-        cellcom_expected_supplier_price(r['Our EUP (NIS)']) - r['Our EUP (NIS)']
-        for _, r in matched_df.iterrows()
-    ) if len(matched_df) else 0
-    actual_total_diff = matched_df['Price Diff (NIS)'].sum() if len(matched_df) else 0
-    unexplained_diff = round(actual_total_diff - total_expected_diff, 2)
-    anomaly_rows = matched_df[matched_df['Price Diff (NIS)'].abs() > 0.01] if len(matched_df) else pd.DataFrame()
+    # Price Diff = actual_supplier - expected_supplier
+    # For normal tariffs: expected diff = -5 (supplier charges 5 less)
+    # For fixed tariffs (15,19,49): expected diff = 0
+    # Anomaly = transaction where actual diff != expected diff
+    if len(matched_df) > 0:
+        matched_df['Expected Diff'] = matched_df.apply(
+            lambda r: cellcom_expected_supplier_price(r['Our EUP (NIS)']) - r['Our EUP (NIS)'], axis=1)
+        matched_df['Anomaly Diff'] = matched_df['Price Diff (NIS)'] - matched_df['Expected Diff']
+        total_expected_discount = round(abs(matched_df['Expected Diff'].sum()), 2)
+        actual_total_diff = round(matched_df['Price Diff (NIS)'].sum(), 2)
+        expected_total_diff = round(matched_df['Expected Diff'].sum(), 2)
+        unexplained_diff = round(actual_total_diff - expected_total_diff, 2)
+        # Anomalies = rows where actual price diff != expected
+        anomaly_rows = matched_df[matched_df['Anomaly Diff'].abs() > 0.01].copy()
+    else:
+        total_expected_discount = 0
+        actual_total_diff = 0
+        unexplained_diff = 0
+        anomaly_rows = pd.DataFrame()
 
     sup_only_df = sup_df[sup_df['phone_norm'].isin(sup_only_phones)].copy()
     sup_only_df['Reason'] = 'Not found in our system'
     sup_only_df['Check_Instruction'] = sup_only_df.apply(
-        lambda r: make_check_instruction('Supplier Only', str(r.get('Sup_Date','')), '', report_date), axis=1)
+        lambda r: make_check_instruction('Supplier Only', r.get('Sup_Date',''), '', report_date), axis=1)
 
     our_only_df = our_dc[our_dc['phone_norm'].isin(our_only_phones)].copy()
     our_only_df['Reason'] = our_only_df.apply(
@@ -600,7 +613,7 @@ def run_recon_cellcom(sup_df, our_df, report_date):
         'pending_count': len(our_pending),
         'price_anomaly_count': len(anomaly_rows),
         'unexplained_diff': unexplained_diff,
-        'total_expected_discount': round(abs(total_expected_diff), 2),
+        'total_expected_discount': total_expected_discount,
     }
     t['real_gap'] = round(t['sup_only_cbd'] - t['our_only_eup'], 2)
 
@@ -1701,3 +1714,4 @@ def create_monthly_excel(history, month_label):
 
 if __name__ == "__main__":
     main()
+
