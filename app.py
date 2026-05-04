@@ -48,7 +48,7 @@ def load_logo(path, mime):
     return ""
 
 LOGO_PAYX    = load_logo("logos/payx_logo.svg", "svg+xml")
-LOGO_PARTNER = load_logo("logos/logo_partner_internet.png", "png")
+LOGO_PARTNER = load_logo("logos/partner_logo.png", "png")
 LOGO_012     = load_logo("logos/talk012_logo.png", "png")
 LOGO_PELE    = load_logo("logos/pelephoen.png", "png")
 LOGO_CELL    = load_logo("logos/cellcom.png", "png")
@@ -680,7 +680,14 @@ def run_recon_pelephone(sup_df, pele_df, global_df, esim_df, report_date):
 # SHARED UI COMPONENTS
 # ============================================================
 def render_header(title, subtitle, logos):
-    logo_html = ''.join([f'<img src="{l}" style="height:48px;object-fit:contain;background:white;border-radius:6px;padding:4px 8px;">' for l in logos if l])
+    logo_parts = []
+    for l in logos:
+        if not l:
+            continue
+        # Partner logo is black — add white rounded background
+        bg = 'background:white;border-radius:6px;padding:3px 6px;' if 'partner' in l.lower() or (len(l) > 100 and l[50:60].count('A') > 3) else ''
+        logo_parts.append(f'<img src="{l}" style="height:48px;object-fit:contain;{bg}">')
+    logo_html = ''.join(logo_parts)
     st.markdown(f"""
     <div class="main-header">
         <div style="flex:1">
