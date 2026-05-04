@@ -48,7 +48,7 @@ def load_logo(path, mime):
     return ""
 
 LOGO_PAYX    = load_logo("logos/payx_logo.svg", "svg+xml")
-LOGO_PARTNER = load_logo("logos/logo_partner_internet.svg", "svg+xml")
+LOGO_PARTNER = load_logo("logos/logo_partner_internet.png", "png")
 LOGO_012     = load_logo("logos/talk012_logo.png", "png")
 LOGO_PELE    = load_logo("logos/pelephoen.png", "png")
 LOGO_CELL    = load_logo("logos/cellcom.png", "png")
@@ -853,8 +853,8 @@ def main():
     if page == "📱 Partner + 012Talk Reconciliation":
         render_header(
             "Partner + 012Talk Reconciliation",
-            "Supplier vs Our System (Partner + 012Talk)",
-            [LOGO_PAYX, LOGO_PARTNER, LOGO_012]
+            "Supplier vs Our System — Partner + 012Talk",
+            [LOGO_PAYX, LOGO_012]
         )
         col1, col2, col3 = st.columns(3)
         with col1:
