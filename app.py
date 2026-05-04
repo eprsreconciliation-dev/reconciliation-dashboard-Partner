@@ -48,7 +48,7 @@ def load_logo(path, mime):
     return ""
 
 LOGO_PAYX    = load_logo("logos/payx_logo.svg", "svg+xml")
-LOGO_PARTNER = load_logo("logos/logo_partner_internet.png", "png")
+LOGO_PARTNER = load_logo("logos/partner_logo.png", "png")
 LOGO_012     = load_logo("logos/talk012_logo.png", "png")
 LOGO_PELE    = load_logo("logos/pelephoen.png", "png")
 LOGO_CELL    = load_logo("logos/cellcom.png", "png")
@@ -676,7 +676,7 @@ def run_recon_pelephone(sup_df, pele_df, global_df, esim_df, report_date):
 # SHARED UI COMPONENTS
 # ============================================================
 def render_header(title, subtitle, logos):
-    logo_html = ''.join([f'<img src="{l}" style="height:32px;object-fit:contain;">' for l in logos if l])
+    logo_html = ''.join([f'<img src="{l}" style="height:48px;object-fit:contain;">' for l in logos if l])
     st.markdown(f"""
     <div class="main-header">
         <div style="flex:1">
@@ -1675,4 +1675,3 @@ def create_monthly_excel(history, month_label):
 
 if __name__ == "__main__":
     main()
-
