@@ -680,7 +680,7 @@ def run_recon_pelephone(sup_df, pele_df, global_df, esim_df, report_date):
 # SHARED UI COMPONENTS
 # ============================================================
 def render_header(title, subtitle, logos):
-    logo_html = ''.join([f'<img src="{l}" style="height:48px;object-fit:contain;">' for l in logos if l])
+    logo_html = ''.join([f'<img src="{l}" style="height:48px;object-fit:contain;background:white;border-radius:6px;padding:4px 8px;">' for l in logos if l])
     st.markdown(f"""
     <div class="main-header">
         <div style="flex:1">
