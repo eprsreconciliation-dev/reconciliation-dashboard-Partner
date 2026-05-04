@@ -1,4 +1,3 @@
-
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -49,10 +48,10 @@ def load_logo(path, mime):
     return ""
 
 LOGO_PAYX    = load_logo("logos/payx_logo.svg", "svg+xml")
-LOGO_PARTNER = load_logo("logos/partner_logo.png", "png")
+LOGO_PARTNER = load_logo("logos/logo_partner_internet.png", "png")
 LOGO_012     = load_logo("logos/talk012_logo.png", "png")
-LOGO_PELE    = load_logo("logos/pelephone_logo.png", "png")
-LOGO_CELL    = load_logo("logos/cellcom_logo.png", "png")
+LOGO_PELE    = load_logo("logos/pelephoen.png", "png")
+LOGO_CELL    = load_logo("logos/cellcom.png", "png")
 
 # ============================================================
 # STYLES
@@ -815,9 +814,9 @@ def main():
         if LOGO_PAYX:
             st.markdown(f'<img src="{LOGO_PAYX}" style="height:28px;margin-bottom:8px;">', unsafe_allow_html=True)
         page = st.radio("Select page", [
-            "📱 Partner & 012Talk Verification",
-            "⭐ Pelephone Verification",
-            "📡 Cellcom Verification",
+            "📱 Partner + 012Talk Reconciliation",
+            "⭐ Pelephone Reconciliation",
+            "📡 Cellcom Reconciliation",
             "📅 Monthly Summary",
             "⏳ Pending Verification",
             "✅ Verified",
@@ -842,9 +841,9 @@ def main():
     # ============================================================
     # PAGE: PARTNER + 012TALK
     # ============================================================
-    if page == "📱 Partner & 012Talk Verification":
+    if page == "📱 Partner + 012Talk Reconciliation":
         render_header(
-            "Partner & 012Talk Charge Verification",
+            "Partner + 012Talk Reconciliation",
             "Supplier vs Our System (Partner + 012Talk)",
             [LOGO_PAYX, LOGO_PARTNER, LOGO_012]
         )
@@ -1027,9 +1026,9 @@ def main():
     # ============================================================
     # PAGE: PELEPHONE
     # ============================================================
-    elif page == "⭐ Pelephone Verification":
+    elif page == "⭐ Pelephone Reconciliation":
         render_header(
-            "Pelephone Charge Verification",
+            "Pelephone Reconciliation",
             "Supplier vs Our System (Pelephone + GlobalSim + eSIM)",
             [LOGO_PAYX, LOGO_PELE]
         )
@@ -1179,9 +1178,9 @@ def main():
     # ============================================================
     # PAGE: CELLCOM
     # ============================================================
-    elif page == "📡 Cellcom Verification":
+    elif page == "📡 Cellcom Reconciliation":
         render_header(
-            "Cellcom Charge Verification",
+            "Cellcom Reconciliation",
             "Supplier vs Our System (Cellcom)",
             [LOGO_PAYX, LOGO_CELL]
         )
@@ -1676,3 +1675,4 @@ def create_monthly_excel(history, month_label):
 
 if __name__ == "__main__":
     main()
+
