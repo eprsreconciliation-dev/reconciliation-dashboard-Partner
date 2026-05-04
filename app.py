@@ -681,12 +681,15 @@ def run_recon_pelephone(sup_df, pele_df, global_df, esim_df, report_date):
 # ============================================================
 def render_header(title, subtitle, logos):
     logo_parts = []
-    for l in logos:
+    for i, l in enumerate(logos):
         if not l:
             continue
-        # Partner logo is black — add white rounded background
-        bg = 'background:white;border-radius:6px;padding:3px 6px;' if 'partner' in l.lower() or (len(l) > 100 and l[50:60].count('A') > 3) else ''
-        logo_parts.append(f'<img src="{l}" style="height:48px;object-fit:contain;{bg}">')
+        # First logo is PAYXPRESS (keep as-is), rest: apply invert filter for dark logos
+        if i == 0:
+            style = 'height:48px;object-fit:contain;'
+        else:
+            style = 'height:48px;object-fit:contain;filter:brightness(0) invert(1);'
+        logo_parts.append(f'<img src="{l}" style="{style}">')
     logo_html = ''.join(logo_parts)
     st.markdown(f"""
     <div class="main-header">
