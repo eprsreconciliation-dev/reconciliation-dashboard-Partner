@@ -48,7 +48,7 @@ def load_logo(path, mime):
     return ""
 
 LOGO_PAYX    = load_logo("logos/payx_logo.svg", "svg+xml")
-LOGO_PARTNER = load_logo("logos/logo_partner_internet.png", "png")
+LOGO_PARTNER = load_logo("logos/logo_partner_internet.svg", "svg+xml")
 LOGO_012     = load_logo("logos/talk012_logo.png", "png")
 LOGO_PELE    = load_logo("logos/pelephoen.png", "png")
 LOGO_CELL    = load_logo("logos/cellcom.png", "png")
