@@ -121,11 +121,17 @@ def get_gspread_client():
     except Exception:
         return None
 
-def get_spreadsheet():
+def get_spreadsheet(operator='partner'):
     gc = get_gspread_client()
     if gc is None: return None
     try:
-        return gc.open_by_key(st.secrets["google_sheets"]["spreadsheet_id"])
+        if operator == 'pelephone':
+            sid = st.secrets["google_sheets_pelephone"]["spreadsheet_id"]
+        elif operator == 'cellcom':
+            sid = st.secrets["google_sheets_cellcom"]["spreadsheet_id"]
+        else:
+            sid = st.secrets["google_sheets"]["spreadsheet_id"]
+        return gc.open_by_key(sid)
     except Exception:
         return None
 
@@ -143,7 +149,7 @@ def _is_month_sheet(title):
     return any(m in title for m in months)
 
 def load_history(month=None, operator_tab=None):
-    sh = get_spreadsheet()
+    sh = get_spreadsheet(operator_tab or 'partner')
     if sh is None: return _load_local_history()
     try:
         if month:
@@ -168,7 +174,7 @@ def load_history(month=None, operator_tab=None):
         return _load_local_history()
 
 def save_to_sheets(record):
-    sh = get_spreadsheet()
+    sh = get_spreadsheet(record.get('operator_tab', 'partner'))
     if sh is None:
         _save_local_history(record)
         return False, "Not connected — saved locally"
@@ -187,7 +193,7 @@ def save_to_sheets(record):
         return False, f"Sheets error: {e}"
 
 def save_details_to_sheets(report_date, operator_tab, rows):
-    sh = get_spreadsheet()
+    sh = get_spreadsheet(operator_tab)
     if sh is None: return False, "Not connected"
     try:
         ws = get_or_create_sheet(sh, 'Transaction Details', DETAIL_COLS)
@@ -206,22 +212,28 @@ def save_details_to_sheets(report_date, operator_tab, rows):
         return False, f"Details error: {e}"
 
 def load_pending_verifications():
-    sh = get_spreadsheet()
-    if sh is None: return []
-    try:
-        ws = get_or_create_sheet(sh, 'Transaction Details', DETAIL_COLS)
-        records = ws.get_all_records()
-        return [r for r in records if str(r.get('verified','')).startswith('⬜')]
-    except: return []
+    all_records = []
+    for op in ['partner', 'pelephone', 'cellcom']:
+        sh = get_spreadsheet(op)
+        if sh is None: continue
+        try:
+            ws = get_or_create_sheet(sh, 'Transaction Details', DETAIL_COLS)
+            records = ws.get_all_records()
+            all_records.extend([r for r in records if str(r.get('verified','')).startswith('⬜')])
+        except: pass
+    return all_records
 
 def load_verified():
-    sh = get_spreadsheet()
-    if sh is None: return []
-    try:
-        ws = get_or_create_sheet(sh, 'Transaction Details', DETAIL_COLS)
-        records = ws.get_all_records()
-        return [r for r in records if not str(r.get('verified','')).startswith('⬜')]
-    except: return []
+    all_records = []
+    for op in ['partner', 'pelephone', 'cellcom']:
+        sh = get_spreadsheet(op)
+        if sh is None: continue
+        try:
+            ws = get_or_create_sheet(sh, 'Transaction Details', DETAIL_COLS)
+            records = ws.get_all_records()
+            all_records.extend([r for r in records if not str(r.get('verified','')).startswith('⬜')])
+        except: pass
+    return all_records
 
 def update_verification(sh, phone, date_val, operator_tab, new_status):
     try:
@@ -238,7 +250,7 @@ def update_verification(sh, phone, date_val, operator_tab, new_status):
     return False
 
 def cross_day_match(result, report_date, operator_tab):
-    sh = get_spreadsheet()
+    sh = get_spreadsheet(operator_tab)
     if sh is None: return [], []
     try:
         ws = sh.worksheet('Transaction Details')
@@ -836,16 +848,22 @@ def main():
 
         st.markdown("---")
         st.markdown("### 📊 History")
-        sh = get_spreadsheet()
+        sh = get_spreadsheet("partner")
         if sh is not None:
             st.success("✅ Google Sheets connected")
         else:
             st.warning("⚠️ Sheets not connected")
-        history = load_history()
-        if history:
-            st.success(f"✅ {len(history)} days recorded")
-            last = history[-1]
-            st.info(f"Last: {last.get('date','N/A')}")
+        total_days = 0
+        last_date = None
+        for op in ['partner', 'pelephone', 'cellcom']:
+            h = load_history(operator_tab=op)
+            total_days += len(h)
+            if h and (last_date is None or h[-1].get('date','') > last_date):
+                last_date = h[-1].get('date','')
+        if total_days > 0:
+            st.success(f"✅ {total_days} days recorded")
+            if last_date:
+                st.info(f"Last: {last_date}")
         else:
             st.info("No history yet")
 
@@ -1349,7 +1367,8 @@ def main():
     # ============================================================
     elif page == "📅 Monthly Summary":
         render_header("Monthly Summary", "All operators — month overview", [LOGO_PAYX])
-        sh = get_spreadsheet()
+        op_filter_pre = st.selectbox("Operator", ["partner","pelephone","cellcom"], key="op_pre")
+        sh = get_spreadsheet(op_filter_pre)
         available_months = []
         if sh is not None:
             try:
@@ -1370,15 +1389,10 @@ def main():
             st.info("No history yet. Run daily reconciliations and click 'Save to Monthly History'.")
             return
 
-        col1, col2 = st.columns([2,1])
-        with col1:
-            selected_month = st.selectbox("Select Month", available_months,
-                format_func=lambda m: datetime.strptime(m, '%Y-%m').strftime('%B %Y'))
-        with col2:
-            op_filter = st.selectbox("Operator", ["All","partner","pelephone","cellcom"])
+        selected_month = st.selectbox("Select Month", available_months,
+            format_func=lambda m: datetime.strptime(m, '%Y-%m').strftime('%B %Y'))
 
-        month_history = load_history(month=selected_month,
-                                     operator_tab=None if op_filter=="All" else op_filter)
+        month_history = load_history(month=selected_month, operator_tab=op_filter_pre)
         if not month_history:
             st.warning("No data for selected month/operator")
             return
@@ -1423,9 +1437,9 @@ def main():
             return
 
         st.warning(f"⏳ {len(pending)} phone(s) need verification")
-        sh = get_spreadsheet()
         df = pd.DataFrame(pending)
         for i, row in enumerate(pending):
+            sh = get_spreadsheet(row.get("operator_tab", "partner"))
             with st.expander(f"📱 {row.get('phone','')} | {row.get('date','')} | {row.get('operator_tab','').upper()} | {row.get('category','')}"):
                 c1,c2 = st.columns(2)
                 c1.write(f"**Product:** {row.get('product','')}")
