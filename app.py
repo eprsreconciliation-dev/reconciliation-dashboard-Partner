@@ -679,13 +679,15 @@ def run_recon_pelephone(sup_df, pele_df, global_df, esim_df, report_date):
 # ============================================================
 # SHARED UI COMPONENTS
 # ============================================================
-def render_header(title, subtitle, logos):
+def render_header(title, subtitle, logos, extra_labels=None):
     logo_html = ''.join([
-        '<img src="' + l + '" style="height:48px;object-fit:contain;background:white;border-radius:6px;padding:3px 8px;">'
-        if idx > 0 else
         '<img src="' + l + '" style="height:48px;object-fit:contain;">'
-        for idx, l in enumerate(logos) if l
+        for l in logos if l
     ])
+    # Add text labels for operators without visible logos
+    if extra_labels:
+        for label in extra_labels:
+            logo_html += '<span style="color:white;font-size:20px;font-weight:600;letter-spacing:1px;padding:4px 10px;border:2px solid rgba(255,255,255,0.6);border-radius:6px;">' + label + '</span>'
     st.markdown(f"""
     <div class="main-header">
         <div style="flex:1">
@@ -854,7 +856,8 @@ def main():
         render_header(
             "Partner + 012Talk Reconciliation",
             "Supplier vs Our System — Partner + 012Talk",
-            [LOGO_PAYX, LOGO_012]
+            [LOGO_PAYX, LOGO_012],
+            extra_labels=['+Partner']
         )
         col1, col2, col3 = st.columns(3)
         with col1:
