@@ -422,7 +422,12 @@ def make_check_instruction(category, sup_date, our_date, report_date, is_late=Fa
     rd = str(report_date)
     if category == 'Supplier Only':
         try:
-            sd = pd.to_datetime(sup_date, dayfirst=True)
+            if hasattr(sup_date, 'strftime'):
+                sd = sup_date
+            else:
+                s = str(sup_date).strip()
+                try: sd = pd.to_datetime(s, dayfirst=False)
+                except: sd = pd.to_datetime(s, dayfirst=True)
             sd_str = sd.strftime('%d-%b-%Y')
             if sd.strftime('%Y-%m-%d') != rd:
                 return f"Check OUR reports for {sd_str} — verify this phone appears there. If yes → date shift, not a real gap."
@@ -432,7 +437,10 @@ def make_check_instruction(category, sup_date, our_date, report_date, is_late=Fa
             return "Check our system for this transaction date."
     elif category == 'Our Only':
         try:
-            dt = pd.to_datetime(our_date, dayfirst=True)
+            if hasattr(our_date, 'strftime'):
+                dt = our_date
+            else:
+                dt = pd.to_datetime(str(our_date), dayfirst=True)
             next_day = (dt + timedelta(days=1)).strftime('%d-%b-%Y')
             if is_late:
                 return f"Late transaction ({dt.strftime('%H:%M')}). Check SUPPLIER report for {next_day} — likely appears there."
@@ -442,9 +450,7 @@ def make_check_instruction(category, sup_date, our_date, report_date, is_late=Fa
             return "Check supplier report for next day."
     return ""
 
-# ============================================================
-# RECONCILIATION — PARTNER + 012TALK
-# ============================================================
+
 def run_recon_partner(sup_df, partner_df, talk_df, report_date):
     our_all = pd.concat([partner_df, talk_df], ignore_index=True)
     our_dc      = our_all[(our_all['Eff_Status'].isin(['DONE','CANCELLED'])) & (~our_all['Is_Refund'])].copy()
@@ -1095,15 +1101,16 @@ def main():
                                          label_visibility="collapsed", key="pe_esim")
             st.caption("eSIM: our 5 NIS vs supplier 7.67 NIS")
 
-        if sup_file and pele_file and glob_file and esim_file:
+        if sup_file and pele_file:
             if st.button("▶ Run Reconciliation", type="primary", use_container_width=True, key="pe_run"):
                 with st.spinner("Processing..."):
                     sup_df,  e1 = load_supplier_pelephone(sup_file.read())
                     pele_df, e2 = load_our(pele_file.read(), 'Pelephone')
-                    glob_df, e3 = load_our(glob_file.read(), 'GlobalSim')
-                    esim_df, e4 = load_our(esim_file.read(), 'eSIM')
                     if e1: st.error(f"Supplier error: {e1}"); return
                     if e2: st.error(f"Pelephone error: {e2}"); return
+                    # Optional files
+                    glob_df, e3 = load_our(glob_file.read(), 'GlobalSim') if glob_file else (pd.DataFrame(), None)
+                    esim_df, e4 = load_our(esim_file.read(), 'eSIM') if esim_file else (pd.DataFrame(), None)
                     if e3: st.error(f"GlobalSim error: {e3}"); return
                     if e4: st.error(f"eSIM error: {e4}"); return
 
