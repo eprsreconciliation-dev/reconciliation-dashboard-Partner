@@ -1714,4 +1714,3 @@ def create_monthly_excel(history, month_label):
 
 if __name__ == "__main__":
     main()
-
