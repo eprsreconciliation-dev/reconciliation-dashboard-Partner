@@ -138,10 +138,9 @@ def get_spreadsheet(operator='partner'):
 def get_or_create_sheet(sh, title, headers):
     try:
         ws = sh.worksheet(title)
-        # Verify headers exist and are correct
-        existing = ws.row_values(1)
-        if not existing or existing != headers:
-            ws.clear()
+        # Only fix if first row is completely empty
+        existing = [c for c in ws.row_values(1) if c]
+        if not existing:
             ws.append_row(headers)
         return ws
     except gspread.WorksheetNotFound:
