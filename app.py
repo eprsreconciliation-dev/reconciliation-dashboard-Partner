@@ -113,12 +113,17 @@ DETAIL_COLS = ['date','operator_tab','category','phone','operator',
 def get_gspread_client():
     if not GSPREAD_AVAILABLE:
         return None
-    try:
-        creds = Credentials.from_service_account_info(
-            dict(st.secrets["gcp_service_account"]), scopes=SCOPES)
-        return gspread.authorize(creds)
-    except Exception:
-        return None
+    for attempt in range(3):
+        try:
+            creds = Credentials.from_service_account_info(
+                dict(st.secrets["gcp_service_account"]), scopes=SCOPES)
+            gc = gspread.authorize(creds)
+            return gc
+        except Exception as e:
+            if attempt == 2:
+                st.sidebar.error(f"Sheets auth error: {e}")
+            continue
+    return None
 
 def get_spreadsheet(operator='partner'):
     gc = get_gspread_client()
