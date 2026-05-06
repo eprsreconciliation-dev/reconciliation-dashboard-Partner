@@ -137,7 +137,13 @@ def get_spreadsheet(operator='partner'):
 
 def get_or_create_sheet(sh, title, headers):
     try:
-        return sh.worksheet(title)
+        ws = sh.worksheet(title)
+        # Verify headers exist and are correct
+        existing = ws.row_values(1)
+        if not existing or existing != headers:
+            ws.clear()
+            ws.append_row(headers)
+        return ws
     except gspread.WorksheetNotFound:
         ws = sh.add_worksheet(title=title, rows=2000, cols=len(headers))
         ws.append_row(headers)
@@ -1063,8 +1069,14 @@ def main():
                     ok, msg = save_to_sheets(record)
                     detail_rows = build_detail_rows(rdate, 'partner', result['sup_only'], result['our_only'])
                     ok2, msg2 = save_details_to_sheets(rdate, 'partner', detail_rows)
-                    st.success(f"✅ {msg}") if ok else st.warning(f"⚠️ {msg}")
-                    st.info(f"📋 {msg2}") if ok2 else st.warning(f"⚠️ {msg2}")
+                    if ok:
+                        st.success(f"✅ {msg}")
+                    else:
+                        st.warning(f"⚠️ {msg}")
+                    if ok2:
+                        st.info(f"📋 {msg2}")
+                    else:
+                        st.warning(f"⚠️ Details: {msg2}")
             with col2:
                 excel_buf = create_excel_report(result, rdate, 'Partner & 012Talk')
                 st.download_button("📥 Download Excel Report", data=excel_buf,
@@ -1220,8 +1232,14 @@ def main():
                     ok, msg = save_to_sheets(record)
                     detail_rows = build_detail_rows(rdate, 'pelephone', result['sup_only'], result['our_only'])
                     ok2, msg2 = save_details_to_sheets(rdate, 'pelephone', detail_rows)
-                    st.success(f"✅ {msg}") if ok else st.warning(f"⚠️ {msg}")
-                    st.info(f"📋 {msg2}") if ok2 else st.warning(f"⚠️ {msg2}")
+                    if ok:
+                        st.success(f"✅ {msg}")
+                    else:
+                        st.warning(f"⚠️ {msg}")
+                    if ok2:
+                        st.info(f"📋 {msg2}")
+                    else:
+                        st.warning(f"⚠️ Details: {msg2}")
             with col2:
                 st.info("Excel export for Pelephone — coming soon")
 
@@ -1377,8 +1395,14 @@ def main():
                     ok, msg = save_to_sheets(record)
                     detail_rows = build_detail_rows(rdate, 'cellcom', result['sup_only'], result['our_only'])
                     ok2, msg2 = save_details_to_sheets(rdate, 'cellcom', detail_rows)
-                    st.success(f"✅ {msg}") if ok else st.warning(f"⚠️ {msg}")
-                    st.info(f"📋 {msg2}") if ok2 else st.warning(f"⚠️ {msg2}")
+                    if ok:
+                        st.success(f"✅ {msg}")
+                    else:
+                        st.warning(f"⚠️ {msg}")
+                    if ok2:
+                        st.info(f"📋 {msg2}")
+                    else:
+                        st.warning(f"⚠️ Details: {msg2}")
             with col2:
                 st.info("Excel export for Cellcom — coming soon")
 
