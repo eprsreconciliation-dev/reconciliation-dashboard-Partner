@@ -110,7 +110,6 @@ HISTORY_COLS = ['date','operator_tab','sup_cbd','our_eup','diff',
 DETAIL_COLS = ['date','operator_tab','category','phone','operator',
                'product','amount','sup_date','our_date','reason','check_instruction','verified']
 
-@st.cache_resource
 def get_gspread_client():
     if not GSPREAD_AVAILABLE:
         return None
