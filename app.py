@@ -202,7 +202,7 @@ def save_details_to_sheets(report_date, operator_tab, rows):
     if sh is None: return False, "Not connected"
     try:
         ws = get_or_create_sheet(sh, 'Transaction Details', DETAIL_COLS)
-        all_data = ws.get_all_records()
+        all_data = ws.get_all_records(expected_headers=DETAIL_COLS)
         keep = [r for r in all_data
                 if not (str(r.get('date','')) == str(report_date) and
                         str(r.get('operator_tab','')) == operator_tab)]
@@ -223,7 +223,7 @@ def load_pending_verifications():
         if sh is None: continue
         try:
             ws = get_or_create_sheet(sh, 'Transaction Details', DETAIL_COLS)
-            records = ws.get_all_records()
+            records = ws.get_all_records(expected_headers=DETAIL_COLS)
             all_records.extend([r for r in records if str(r.get('verified','')).startswith('⬜')])
         except: pass
     return all_records
@@ -235,7 +235,7 @@ def load_verified():
         if sh is None: continue
         try:
             ws = get_or_create_sheet(sh, 'Transaction Details', DETAIL_COLS)
-            records = ws.get_all_records()
+            records = ws.get_all_records(expected_headers=DETAIL_COLS)
             all_records.extend([r for r in records if not str(r.get('verified','')).startswith('⬜')])
         except: pass
     return all_records
@@ -243,7 +243,7 @@ def load_verified():
 def update_verification(sh, phone, date_val, operator_tab, new_status):
     try:
         ws = sh.worksheet('Transaction Details')
-        records = ws.get_all_records()
+        records = ws.get_all_records(expected_headers=DETAIL_COLS)
         for i, r in enumerate(records):
             if (str(r.get('phone','')) == str(phone) and
                 str(r.get('date','')) == str(date_val) and
@@ -259,7 +259,7 @@ def cross_day_match(result, report_date, operator_tab):
     if sh is None: return [], []
     try:
         ws = sh.worksheet('Transaction Details')
-        all_details = ws.get_all_records()
+        all_details = ws.get_all_records(expected_headers=DETAIL_COLS)
         df = pd.DataFrame(all_details)
         if df.empty: return [], []
         df = df[df['operator_tab'] == operator_tab]
