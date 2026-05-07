@@ -398,18 +398,21 @@ def load_supplier_pelephone(file_bytes):
     try:
         df = pd.read_excel(BytesIO(file_bytes))
         # Column F = Unnamed: 5 = TOPUP_PRICE (price we pay)
-        df.rename(columns={
+        # Support both old format (Unnamed: 5) and new format (TOPUP_PRICE)
+        rename_map = {
             'Serial_Number':'Serial',
             "#DOC_NUMBER'":'Doc_Number',
             'Order_Number':'Order_Number',
             'TOPUP_TIME':'Sup_Time',
             'TOPUP_DATE':'Sup_Date',
-            'Unnamed: 5':'TOPUP_PRICE',
             'dealer_price':'Dealer_Price',
             'TOPUP_ITEM':'TOPUP_ITEM',
             'Dealer':'Dealer',
-            'SUBSCRIBER':'MSISDN'
-        }, inplace=True)
+            'SUBSCRIBER':'MSISDN',
+        }
+        if 'Unnamed: 5' in df.columns:
+            rename_map['Unnamed: 5'] = 'TOPUP_PRICE'
+        df.rename(columns=rename_map, inplace=True)
         df['TOPUP_PRICE'] = pd.to_numeric(df.get('TOPUP_PRICE',0), errors='coerce').fillna(0)
         df['phone_norm'] = df['MSISDN'].apply(norm_phone)
         df['Phone_Display'] = df['phone_norm'].apply(display_phone)
