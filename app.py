@@ -1247,7 +1247,11 @@ def main():
                     else:
                         st.warning(f"⚠️ Details: {msg2}")
             with col2:
-                st.info("Excel export for Pelephone — coming soon")
+                excel_buf = create_excel_report(result, rdate, 'Pelephone')
+                st.download_button("📥 Download Excel Report", data=excel_buf,
+                    file_name=f"Pelephone_{rdate.replace('-','_')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True, type="primary")
 
     # ============================================================
     # PAGE: CELLCOM
@@ -1410,7 +1414,11 @@ def main():
                     else:
                         st.warning(f"⚠️ Details: {msg2}")
             with col2:
-                st.info("Excel export for Cellcom — coming soon")
+                excel_buf = create_excel_report(result, rdate, 'Cellcom')
+                st.download_button("📥 Download Excel Report", data=excel_buf,
+                    file_name=f"Cellcom_{rdate.replace('-','_')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True, type="primary")
 
     # ============================================================
     # PAGE: MONTHLY SUMMARY
