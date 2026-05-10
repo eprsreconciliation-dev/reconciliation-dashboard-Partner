@@ -88,7 +88,7 @@ st.markdown("""
 # ============================================================
 # CELLCOM PRICE MAP  (our EUP → expected supplier price)
 # ============================================================
-CELLCOM_FIXED = {19.0, 15.0, 49.0}   # no change
+CELLCOM_FIXED = {15.0, 19.0, 25.0, 29.0, 49.0}   # fixed tariffs — no discount
 CELLCOM_DISCOUNT = 5.0                 # all others: supplier = ours - 5
 
 def cellcom_expected_supplier_price(our_eup):
@@ -320,7 +320,7 @@ def load_our(file_bytes, operator_name):
         df['End User Price'] = pd.to_numeric(df.get('End User Price',0), errors='coerce').fillna(0)
         df['Customer price'] = pd.to_numeric(df.get('Customer price',0), errors='coerce').fillna(0)
         df = df[~df['Action'].isin(['REWARD','REFUND_REWARD'])]
-        df['Is_Refund'] = df['Action'] == 'REFUND'
+        df['Is_Refund'] = (df['Action'] == 'REFUND') & (df['Status'] == 'DONE')
         df['Eff_Status'] = df.apply(
             lambda r: 'CANCELLED' if r['Action']=='REFUND' else r['Status'], axis=1)
         df['phone_norm'] = df['Phone Number'].apply(norm_phone)
@@ -502,7 +502,7 @@ def run_recon_partner(sup_df, partner_df, talk_df, report_date):
             })
 
     matched_df = pd.DataFrame(matched_rows)
-    sup_only_df = sup_df[sup_df['phone_norm'].isin(sup_only_phones)].copy()
+    sup_only_df = sup_pure[sup_pure['phone_norm'].isin(sup_only_phones)].copy()
     sup_only_df['Reason'] = 'Not found in our system'
     sup_only_df['Check_Instruction'] = sup_only_df.apply(
         lambda r: make_check_instruction('Supplier Only', r.get('Sup_Date',''), '', report_date), axis=1)
@@ -549,15 +549,35 @@ def run_recon_cellcom(sup_df, our_df, report_date):
     our_refunds = our_df[our_df['Is_Refund']].copy()
     our_failed  = our_df[our_df['Eff_Status'] == 'FAILED'].copy()
     our_pending = our_df[our_df['Eff_Status'] == 'PENDING'].copy()
+    # Split supplier: pure purchases vs refunds
+    sup_pure       = sup_df[(sup_df['CBD'] > 0) & (sup_df['Cancel_Amt'] == 0)].copy()
+    sup_refunds_df = sup_df[(sup_df['CBD'] > 0) & (sup_df['Cancel_Amt'] > 0)].copy()
 
-    sup_phones    = set(sup_df['phone_norm'])
+    sup_phones    = set(sup_pure['phone_norm'])
     our_dc_phones = set(our_dc['phone_norm'])
-
     matched_phones  = sup_phones & our_dc_phones
     sup_only_phones = sup_phones - our_dc_phones
     our_only_phones = our_dc_phones - sup_phones
 
+    # Match refunds: sup Cancel_Amt > 0 vs our REFUND+DONE
+    used_our_ref = set()
+    used_sup_ref = set()
+    unmatched_our_ref = []
+    for si, sr in sup_refunds_df.iterrows():
+        if si in used_sup_ref: continue
+        om = our_refunds[(our_refunds['phone_norm'] == sr['phone_norm']) & (~our_refunds['Transaction ID'].isin(used_our_ref))]
+        if len(om) > 0:
+            used_our_ref.add(om.iloc[0]['Transaction ID'])
+            used_sup_ref.add(si)
+    for _, or_ in our_refunds.iterrows():
+        if or_['Transaction ID'] not in used_our_ref:
+            unmatched_our_ref.append(or_)
+    unmatched_our_ref_df = pd.DataFrame(unmatched_our_ref) if unmatched_our_ref else pd.DataFrame()
+
     matched_rows = []
+    used_our = set()
+    used_sup = set()
+    price_diffs = []
     used_our = set()
     used_sup = set()
     price_diffs = []
@@ -646,7 +666,7 @@ def run_recon_cellcom(sup_df, our_df, report_date):
         unexplained_diff = 0
         anomaly_rows = pd.DataFrame()
 
-    sup_only_df = sup_df[sup_df['phone_norm'].isin(sup_only_phones)].copy()
+    sup_only_df = sup_pure[sup_pure['phone_norm'].isin(sup_only_phones)].copy()
     sup_only_df['Reason'] = 'Not found in our system'
     sup_only_df['Check_Instruction'] = sup_only_df.apply(
         lambda r: make_check_instruction('Supplier Only', r.get('Sup_Date',''), '', report_date), axis=1)
@@ -658,7 +678,7 @@ def run_recon_cellcom(sup_df, our_df, report_date):
         lambda r: make_check_instruction('Our Only','',r.get('Date & Time',''), report_date, r.get('Is_Late',False)), axis=1)
 
     t = {
-        'sup_cbd': sup_df[sup_df['phone_norm'].isin(matched_phones)]['CBD'].sum(),
+        'sup_cbd': sup_pure[sup_pure['phone_norm'].isin(matched_phones)]['CBD'].sum(),
         'our_eup': our_dc[our_dc['phone_norm'].isin(matched_phones)]['End User Price'].sum(),
         'sup_only_cbd': sup_only_df['CBD'].sum() if len(sup_only_df) else 0,
         'our_only_eup': our_only_df['End User Price'].sum() if len(our_only_df) else 0,
@@ -668,6 +688,7 @@ def run_recon_cellcom(sup_df, our_df, report_date):
         'sup_only_count': len(sup_only_phones),
         'our_only_count': len(our_only_phones),
         'refunds_count': len(our_refunds),
+        'unmatched_our_ref_count': len(unmatched_our_ref),
         'failed_count': len(our_failed),
         'pending_count': len(our_pending),
         'price_anomaly_count': len(anomaly_rows),
