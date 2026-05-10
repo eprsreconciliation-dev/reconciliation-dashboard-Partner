@@ -657,7 +657,7 @@ def run_recon_cellcom(sup_df, our_df, report_date):
         total_expected_discount = round(abs(matched_df['Expected Diff'].sum()), 2)
         actual_total_diff = round(matched_df['Price Diff (NIS)'].sum(), 2)
         expected_total_diff = round(matched_df['Expected Diff'].sum(), 2)
-        unexplained_diff = round(actual_total_diff - expected_total_diff, 2)
+        unexplained_diff = round(abs(actual_total_diff) - total_expected_discount, 2)
         # Anomalies = rows where actual price diff != expected
         anomaly_rows = matched_df[matched_df['Anomaly Diff'].abs() > 0.01].copy()
     else:
