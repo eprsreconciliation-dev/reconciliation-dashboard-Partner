@@ -550,48 +550,25 @@ def run_recon_cellcom(sup_df, our_df, report_date):
     our_failed  = our_df[our_df['Eff_Status'] == 'FAILED'].copy()
     our_pending = our_df[our_df['Eff_Status'] == 'PENDING'].copy()
 
-    # Split supplier: pure purchases vs refunds (Cancel_Amt > 0)
-    sup_pure    = sup_df[sup_df['Cancel_Amt'] == 0].copy()
-    sup_refunds = sup_df[sup_df['Cancel_Amt'] > 0].copy()
-
-    sup_phones    = set(sup_pure['phone_norm'])
+    sup_phones    = set(sup_df['phone_norm'])
     our_dc_phones = set(our_dc['phone_norm'])
 
     matched_phones  = sup_phones & our_dc_phones
     sup_only_phones = sup_phones - our_dc_phones
     our_only_phones = our_dc_phones - sup_phones
 
-    # Match supplier refunds with our refunds
-    sup_ref_phones = set(sup_refunds['phone_norm'])
-    our_ref_phones = set(our_refunds['phone_norm'])
-    matched_refund_phones  = sup_ref_phones & our_ref_phones
-    sup_only_refund_phones = sup_ref_phones - our_ref_phones
-    our_only_refund_phones = our_ref_phones - sup_ref_phones
-
     matched_rows = []
     used_our = set()
-    used_sup = set()
     price_diffs = []
-
-    sup_matched = sup_pure[sup_pure['phone_norm'].isin(matched_phones)].copy()
-
-    # Pass 1: match by phone + expected price
-    for si, sr in sup_matched.iterrows():
-        if si in used_sup: continue
-        phone = sr['phone_norm']
-        actual_sup = sr['CBD']
-        om = our_dc[
-            (our_dc['phone_norm'] == phone) &
-            (~our_dc['Transaction ID'].isin(used_our)) &
-            (our_dc['End User Price'].apply(cellcom_expected_supplier_price) == actual_sup)
-        ]
+    for _, sr in sup_df[sup_df['phone_norm'].isin(matched_phones)].iterrows():
+        om = our_dc[(our_dc['phone_norm']==sr['phone_norm']) & (~our_dc['Transaction ID'].isin(used_our))]
         if len(om) > 0:
             or_ = om.iloc[0]
             used_our.add(or_['Transaction ID'])
-            used_sup.add(si)
             our_eup = or_['End User Price']
             expected_sup = cellcom_expected_supplier_price(our_eup)
-            price_diff = round(actual_sup - expected_sup, 2)
+            actual_sup   = sr['CBD']
+            price_diff   = round(actual_sup - expected_sup, 2)
             price_diffs.append(price_diff)
             matched_rows.append({
                 'Phone': or_['Phone_Display'],
@@ -604,74 +581,6 @@ def run_recon_cellcom(sup_df, our_df, report_date):
                 'Our Product': or_['Product Name'],
                 'Our EUP (NIS)': our_eup,
             })
-
-    # Pass 2: fallback by phone only for remaining unmatched
-    for si, sr in sup_matched.iterrows():
-        if si in used_sup: continue
-        phone = sr['phone_norm']
-        actual_sup = sr['CBD']
-        om = our_dc[
-            (our_dc['phone_norm'] == phone) &
-            (~our_dc['Transaction ID'].isin(used_our))
-        ]
-        if len(om) > 0:
-            or_ = om.iloc[0]
-            used_our.add(or_['Transaction ID'])
-            used_sup.add(si)
-            our_eup = or_['End User Price']
-            expected_sup = cellcom_expected_supplier_price(our_eup)
-            price_diff = round(actual_sup - expected_sup, 2)
-            price_diffs.append(price_diff)
-            matched_rows.append({
-                'Phone': or_['Phone_Display'],
-                'Supplier Date': str(sr.get('Sup_Date','')),
-                'Supplier CBD (NIS)': actual_sup,
-                'Expected Supplier Price': expected_sup,
-                'Price Diff (NIS)': price_diff,
-                'Our Tx ID': or_['Transaction ID'],
-                'Our Date': or_['Date & Time'],
-                'Our Product': or_['Product Name'],
-                'Our EUP (NIS)': our_eup,
-            })
-
-    # Match refunds: supplier Cancel_Amt vs our REFUND
-    matched_refund_rows = []
-    unmatched_our_refunds = []
-    unmatched_sup_refunds = []
-    used_our_ref = set()
-    used_sup_ref = set()
-
-    for si, sr in sup_refunds.iterrows():
-        if si in used_sup_ref: continue
-        phone = sr['phone_norm']
-        om = our_refunds[
-            (our_refunds['phone_norm'] == phone) &
-            (~our_refunds['Transaction ID'].isin(used_our_ref))
-        ]
-        if len(om) > 0:
-            or_ = om.iloc[0]
-            used_our_ref.add(or_['Transaction ID'])
-            used_sup_ref.add(si)
-            matched_refund_rows.append({
-                'Phone': or_['Phone_Display'],
-                'Supplier Date': str(sr.get('Sup_Date','')),
-                'Supplier CBD (NIS)': sr['CBD'],
-                'Supplier Cancel (NIS)': sr['Cancel_Amt'],
-                'Our Tx ID': or_['Transaction ID'],
-                'Our Date': or_['Date & Time'],
-                'Our Product': or_['Product Name'],
-                'Our EUP (NIS)': or_['End User Price'],
-            })
-        else:
-            unmatched_sup_refunds.append(sr)
-
-    for _, or_ in our_refunds.iterrows():
-        if or_['Transaction ID'] not in used_our_ref:
-            unmatched_our_refunds.append(or_)
-
-    matched_refunds_df = pd.DataFrame(matched_refund_rows)
-    unmatched_our_ref_df = pd.DataFrame(unmatched_our_refunds) if unmatched_our_refunds else pd.DataFrame()
-    unmatched_sup_ref_df = pd.DataFrame(unmatched_sup_refunds) if unmatched_sup_refunds else pd.DataFrame()
 
     matched_df = pd.DataFrame(matched_rows)
 
@@ -696,7 +605,7 @@ def run_recon_cellcom(sup_df, our_df, report_date):
         unexplained_diff = 0
         anomaly_rows = pd.DataFrame()
 
-    sup_only_df = sup_pure[sup_pure['phone_norm'].isin(sup_only_phones)].copy()
+    sup_only_df = sup_df[sup_df['phone_norm'].isin(sup_only_phones)].copy()
     sup_only_df['Reason'] = 'Not found in our system'
     sup_only_df['Check_Instruction'] = sup_only_df.apply(
         lambda r: make_check_instruction('Supplier Only', r.get('Sup_Date',''), '', report_date), axis=1)
@@ -707,12 +616,8 @@ def run_recon_cellcom(sup_df, our_df, report_date):
     our_only_df['Check_Instruction'] = our_only_df.apply(
         lambda r: make_check_instruction('Our Only','',r.get('Date & Time',''), report_date, r.get('Is_Late',False)), axis=1)
 
-    # Unmatched refunds — our refund with no supplier cancel (date shift)
-    unmatched_our_ref_df['Reason'] = 'Refund — purchase was previous day' if len(unmatched_our_ref_df) > 0 else None
-    unmatched_our_ref_df['Check_Instruction'] = 'Check supplier report for previous day — cancel should appear there' if len(unmatched_our_ref_df) > 0 else None
-
     t = {
-        'sup_cbd': sup_pure[sup_pure['phone_norm'].isin(matched_phones)]['CBD'].sum(),
+        'sup_cbd': sup_df[sup_df['phone_norm'].isin(matched_phones)]['CBD'].sum(),
         'our_eup': our_dc[our_dc['phone_norm'].isin(matched_phones)]['End User Price'].sum(),
         'sup_only_cbd': sup_only_df['CBD'].sum() if len(sup_only_df) else 0,
         'our_only_eup': our_only_df['End User Price'].sum() if len(our_only_df) else 0,
@@ -722,9 +627,6 @@ def run_recon_cellcom(sup_df, our_df, report_date):
         'sup_only_count': len(sup_only_phones),
         'our_only_count': len(our_only_phones),
         'refunds_count': len(our_refunds),
-        'matched_refunds_count': len(matched_refund_rows),
-        'unmatched_our_ref_count': len(unmatched_our_refunds),
-        'unmatched_sup_ref_count': len(unmatched_sup_refunds),
         'failed_count': len(our_failed),
         'pending_count': len(our_pending),
         'price_anomaly_count': len(anomaly_rows),
@@ -735,9 +637,6 @@ def run_recon_cellcom(sup_df, our_df, report_date):
 
     return {'matched': matched_df, 'sup_only': sup_only_df, 'our_only': our_only_df,
             'refunds': our_refunds, 'failed': our_failed, 'pending': our_pending,
-            'matched_refunds': matched_refunds_df,
-            'unmatched_our_refunds': unmatched_our_ref_df,
-            'unmatched_sup_refunds': unmatched_sup_ref_df,
             'anomalies': anomaly_rows, 'totals': t}
 
 # ============================================================
@@ -1477,21 +1376,11 @@ def main():
                         st.dataframe(result['anomalies'], use_container_width=True, hide_index=True)
                 else: st.info("No matched records")
             with tabs[4]:
-                t_ref = result['totals']
-                st.markdown(f"**Matched refunds:** {t_ref.get('matched_refunds_count',0)} | **Unmatched (date shift):** {t_ref.get('unmatched_our_ref_count',0)}")
-                if len(result.get('matched_refunds', pd.DataFrame())) > 0:
-                    st.markdown("##### ✅ Matched Refunds")
-                    st.dataframe(result['matched_refunds'], use_container_width=True, hide_index=True)
-                if len(result.get('unmatched_our_refunds', pd.DataFrame())) > 0:
-                    st.warning(f"⚠️ {t_ref.get('unmatched_our_ref_count',0)} refund(s) not matched — purchase was previous day")
-                    show = result['unmatched_our_refunds']
-                    cols = [c for c in ['Phone_Display','Date & Time','Product Name','End User Price'] if c in show.columns]
-                    st.dataframe(show[cols].rename(columns={'Phone_Display':'Phone','End User Price':'EUP (NIS)'}), use_container_width=True, hide_index=True)
-                if len(result.get('unmatched_sup_refunds', pd.DataFrame())) > 0:
-                    st.warning(f"⚠️ {t_ref.get('unmatched_sup_ref_count',0)} supplier cancel(s) not matched")
-                    st.dataframe(pd.DataFrame(result['unmatched_sup_refunds']), use_container_width=True, hide_index=True)
-                if t_ref.get('matched_refunds_count',0) == 0 and t_ref.get('unmatched_our_ref_count',0) == 0:
-                    st.info("No refunds")
+                if len(result['refunds']) > 0:
+                    show = result['refunds'][['Phone_Display','Date & Time','Product Name','End User Price']].rename(
+                        columns={'Phone_Display':'Phone','End User Price':'EUP (NIS)'})
+                    st.dataframe(show, use_container_width=True, hide_index=True)
+                else: st.info("No refunds")
             with tabs[5]:
                 if len(result['failed']) > 0:
                     show = result['failed'][['Phone_Display','Date & Time','Product Name','Error description']].rename(
