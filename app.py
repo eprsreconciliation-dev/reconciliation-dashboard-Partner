@@ -559,16 +559,57 @@ def run_recon_cellcom(sup_df, our_df, report_date):
 
     matched_rows = []
     used_our = set()
+    used_sup = set()
     price_diffs = []
-    for _, sr in sup_df[sup_df['phone_norm'].isin(matched_phones)].iterrows():
-        om = our_dc[(our_dc['phone_norm']==sr['phone_norm']) & (~our_dc['Transaction ID'].isin(used_our))]
+
+    sup_matched = sup_df[sup_df['phone_norm'].isin(matched_phones)].copy()
+
+    # Pass 1: match by phone + expected price
+    for si, sr in sup_matched.iterrows():
+        if si in used_sup: continue
+        phone = sr['phone_norm']
+        actual_sup = sr['CBD']
+        om = our_dc[
+            (our_dc['phone_norm'] == phone) &
+            (~our_dc['Transaction ID'].isin(used_our)) &
+            (our_dc['End User Price'].apply(cellcom_expected_supplier_price) == actual_sup)
+        ]
         if len(om) > 0:
             or_ = om.iloc[0]
             used_our.add(or_['Transaction ID'])
+            used_sup.add(si)
             our_eup = or_['End User Price']
             expected_sup = cellcom_expected_supplier_price(our_eup)
-            actual_sup   = sr['CBD']
-            price_diff   = round(actual_sup - expected_sup, 2)
+            price_diff = round(actual_sup - expected_sup, 2)
+            price_diffs.append(price_diff)
+            matched_rows.append({
+                'Phone': or_['Phone_Display'],
+                'Supplier Date': str(sr.get('Sup_Date','')),
+                'Supplier CBD (NIS)': actual_sup,
+                'Expected Supplier Price': expected_sup,
+                'Price Diff (NIS)': price_diff,
+                'Our Tx ID': or_['Transaction ID'],
+                'Our Date': or_['Date & Time'],
+                'Our Product': or_['Product Name'],
+                'Our EUP (NIS)': our_eup,
+            })
+
+    # Pass 2: fallback by phone only for remaining unmatched
+    for si, sr in sup_matched.iterrows():
+        if si in used_sup: continue
+        phone = sr['phone_norm']
+        actual_sup = sr['CBD']
+        om = our_dc[
+            (our_dc['phone_norm'] == phone) &
+            (~our_dc['Transaction ID'].isin(used_our))
+        ]
+        if len(om) > 0:
+            or_ = om.iloc[0]
+            used_our.add(or_['Transaction ID'])
+            used_sup.add(si)
+            our_eup = or_['End User Price']
+            expected_sup = cellcom_expected_supplier_price(our_eup)
+            price_diff = round(actual_sup - expected_sup, 2)
             price_diffs.append(price_diff)
             matched_rows.append({
                 'Phone': or_['Phone_Display'],
