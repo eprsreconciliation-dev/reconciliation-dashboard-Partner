@@ -651,15 +651,12 @@ def run_recon_cellcom(sup_df, our_df, report_date):
     # For fixed tariffs (15,19,49): expected diff = 0
     # Anomaly = transaction where actual diff != expected diff
     if len(matched_df) > 0:
-        matched_df['Expected Diff'] = matched_df.apply(
-            lambda r: cellcom_expected_supplier_price(r['Our EUP (NIS)']) - r['Our EUP (NIS)'], axis=1)
-        matched_df['Anomaly Diff'] = matched_df['Price Diff (NIS)'] - matched_df['Expected Diff']
-        total_expected_discount = round(abs(matched_df['Expected Diff'].sum()), 2)
-        actual_total_diff = round(matched_df['Price Diff (NIS)'].sum(), 2)
-        expected_total_diff = round(matched_df['Expected Diff'].sum(), 2)
-        unexplained_diff = round(matched_df['Anomaly Diff'].sum(), 2)
-        # Anomalies = rows where actual price diff != expected
-        anomaly_rows = matched_df[matched_df['Anomaly Diff'].abs() > 0.01].copy()
+        matched_df['Expected Discount'] = matched_df['Our EUP (NIS)'] - matched_df['Expected Supplier Price']
+        total_expected_discount = round(matched_df['Expected Discount'].sum(), 2)
+        actual_discount = round(matched_df['Our EUP (NIS)'].sum() - matched_df['Supplier CBD (NIS)'].sum(), 2)
+        unexplained_diff = round(actual_discount - total_expected_discount, 2)
+        # Anomalies = rows where Price Diff != 0
+        anomaly_rows = matched_df[matched_df['Price Diff (NIS)'].abs() > 0.01].copy()
     else:
         total_expected_discount = 0
         actual_total_diff = 0
