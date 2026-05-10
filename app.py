@@ -88,7 +88,7 @@ st.markdown("""
 # ============================================================
 # CELLCOM PRICE MAP  (our EUP → expected supplier price)
 # ============================================================
-CELLCOM_FIXED = {15.0, 19.0, 25.0, 29.0, 49.0}   # fixed tariffs — no discount
+CELLCOM_FIXED = {15.0, 19.0, 25.0, 29.0, 39.9, 49.0}   # fixed tariffs — no discount
 CELLCOM_DISCOUNT = 5.0                 # all others: supplier = ours - 5
 
 def cellcom_expected_supplier_price(our_eup):
