@@ -582,7 +582,7 @@ def run_recon_cellcom(sup_df, our_df, report_date):
     used_sup = set()
     price_diffs = []
 
-    sup_matched = sup_df[sup_df['phone_norm'].isin(matched_phones)].copy()
+    sup_matched = sup_pure[sup_pure['phone_norm'].isin(matched_phones)].copy()
 
     # Pass 1: match by phone + expected price
     for si, sr in sup_matched.iterrows():
@@ -657,7 +657,7 @@ def run_recon_cellcom(sup_df, our_df, report_date):
         total_expected_discount = round(abs(matched_df['Expected Diff'].sum()), 2)
         actual_total_diff = round(matched_df['Price Diff (NIS)'].sum(), 2)
         expected_total_diff = round(matched_df['Expected Diff'].sum(), 2)
-        unexplained_diff = round(abs(actual_total_diff) - total_expected_discount, 2)
+        unexplained_diff = round(actual_total_diff - expected_total_diff, 2)
         # Anomalies = rows where actual price diff != expected
         anomaly_rows = matched_df[matched_df['Anomaly Diff'].abs() > 0.01].copy()
     else:
