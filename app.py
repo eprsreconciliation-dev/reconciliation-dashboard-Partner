@@ -322,7 +322,7 @@ def load_our(file_bytes, operator_name):
         df = df[~df['Action'].isin(['REWARD','REFUND_REWARD'])]
         df['Is_Refund'] = (df['Action'] == 'REFUND') & (df['Status'] == 'DONE')
         df['Eff_Status'] = df.apply(
-            lambda r: 'CANCELLED' if r['Action']=='REFUND' else r['Status'], axis=1)
+            lambda r: 'CANCELLED' if (r['Action']=='REFUND' and r['Status']=='DONE') else r['Status'], axis=1)
         df['phone_norm'] = df['Phone Number'].apply(norm_phone)
         df['Phone_Display'] = df['phone_norm'].apply(display_phone)
         try:
