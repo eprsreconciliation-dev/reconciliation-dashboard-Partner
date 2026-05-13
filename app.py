@@ -143,9 +143,9 @@ def check_sheets_banner():
     if st.session_state.get('sheets_unavailable'):
         st.markdown("""
         <div class="sheets-error">
-        ⛔ <strong>Google Sheets недоступен.</strong> Данные будут сохранены ЛОКАЛЬНО
-        и могут быть потеряны при перезапуске сервера. Свяжитесь с администратором
-        для восстановления подключения перед сохранением.
+        ⛔ <strong>Google Sheets unavailable.</strong> Data will be saved LOCALLY
+        and may be lost on server restart. Contact your administrator
+        to restore the connection before saving.
         </div>
         """, unsafe_allow_html=True)
         return False
@@ -205,18 +205,18 @@ def save_confirmation_ui(report_date, operator_tab, session_key):
     if st.session_state.get(confirm_pending_key):
         st.warning(
             f"⚠️ За **{report_date}** ({operator_tab}) уже есть сохранённая запись в Google Sheets.\n\n"
-            f"Что сделать?"
+            f"What would you like to do?"
         )
         col_yes, col_no = st.columns(2)
         with col_yes:
-            if st.button("✅ Сохранить как новую версию", key=session_key + '_yes', use_container_width=True):
+            if st.button("✅ Save as new version", key=session_key + '_yes', use_container_width=True):
                 st.session_state[confirm_ok_key] = True
                 st.session_state.pop(confirm_pending_key, None)
                 st.rerun()
         with col_no:
             if st.button("❌ Отмена", key=session_key + '_no', use_container_width=True):
                 st.session_state.pop(confirm_pending_key, None)
-                st.info("Сохранение отменено. Старые данные не изменены.")
+                st.info("Save cancelled. Existing data unchanged.")
         return False  # Wait for user choice
 
     return True
@@ -291,17 +291,17 @@ def save_to_sheets(record):
     sh = get_spreadsheet(record.get('operator_tab', 'partner'))
     if sh is None:
         _save_local_history(record)
-        return False, "⚠️ Sheets недоступен — сохранено локально (риск потери при рестарте!)"
+        return False, "⚠️ Sheets недоступен — saved locally (риск потери при рестарте!)"
     try:
         dt = datetime.strptime(record['date'], '%Y-%m-%d')
         ws = get_or_create_sheet(sh, dt.strftime('%B %Y'), HISTORY_COLS)
 
         # SAFE: always append, never update existing rows
         ws.append_row([record.get(c, '') for c in HISTORY_COLS])
-        return True, f"✅ Добавлена новая запись за {record['date']} в '{dt.strftime('%B %Y')}'"
+        return True, f"✅ New record added for {record['date']} в '{dt.strftime('%B %Y')}'"
     except Exception as e:
         _save_local_history(record)
-        return False, f"⚠️ Ошибка Sheets: {e} — сохранено локально"
+        return False, f"⚠️ Sheets error: {e} — saved locally"
 
 # ---- FIX 3: safe save_details_to_sheets — NO ws.clear(), uses append only ----
 def save_details_to_sheets(report_date, operator_tab, rows):
@@ -1065,7 +1065,7 @@ def main():
         if sh is not None:
             st.success("✅ Google Sheets connected")
         else:
-            st.error("⛔ Google Sheets недоступен\nДанные НЕ будут сохранены в облако!")
+            st.error("⛔ Google Sheets unavailable\nData will NOT be saved to the cloud!")
 
         total_days = 0
         last_date = None
