@@ -216,7 +216,11 @@ def save_confirmation_ui(report_date, operator_tab, session_key):
         with col_no:
             if st.button("❌ Cancel", key=session_key + '_no', use_container_width=True):
                 st.session_state.pop(confirm_pending_key, None)
-                st.info("Save cancelled. Existing data unchanged.")
+                st.session_state['show_cancel_msg'] = True
+        if st.session_state.get('show_cancel_msg'):
+            st.session_state.pop('show_cancel_msg', None)
+            st.info("Save cancelled. Existing data unchanged.")
+            return False
         return False  # Wait for user choice
 
     return True
@@ -1267,8 +1271,11 @@ def main():
                     ok, msg = save_to_sheets(record)
                     detail_rows = build_detail_rows(rdate, 'partner', result['sup_only'], result['our_only'])
                     ok2, msg2 = save_details_to_sheets(rdate, 'partner', detail_rows)
-                    st.success(f"✅ {msg}") if ok else st.warning(f"⚠️ {msg}")
-                    st.info(f"📋 {msg2}") if ok2 else st.warning(f"⚠️ Details: {msg2}")
+                    if ok:
+                        st.success(f"✅ {msg}")
+                    else:
+                        st.warning(f"⚠️ {msg}")
+                    st.info(f"📋 {msg2}") if ok2 else st.warning(f"⚠️ Details: {msg2}"); pass
 
     # ============================================================
     # PAGE: PELEPHONE
@@ -1429,8 +1436,11 @@ def main():
                     ok, msg = save_to_sheets(record)
                     detail_rows = build_detail_rows(rdate, 'pelephone', result['sup_only'], result['our_only'])
                     ok2, msg2 = save_details_to_sheets(rdate, 'pelephone', detail_rows)
-                    st.success(f"✅ {msg}") if ok else st.warning(f"⚠️ {msg}")
-                    st.info(f"📋 {msg2}") if ok2 else st.warning(f"⚠️ Details: {msg2}")
+                    if ok:
+                        st.success(f"✅ {msg}")
+                    else:
+                        st.warning(f"⚠️ {msg}")
+                    st.info(f"📋 {msg2}") if ok2 else st.warning(f"⚠️ Details: {msg2}"); pass
 
     # ============================================================
     # PAGE: CELLCOM
@@ -1595,8 +1605,11 @@ def main():
                     ok, msg = save_to_sheets(record)
                     detail_rows = build_detail_rows(rdate, 'cellcom', result['sup_only'], result['our_only'])
                     ok2, msg2 = save_details_to_sheets(rdate, 'cellcom', detail_rows)
-                    st.success(f"✅ {msg}") if ok else st.warning(f"⚠️ {msg}")
-                    st.info(f"📋 {msg2}") if ok2 else st.warning(f"⚠️ Details: {msg2}")
+                    if ok:
+                        st.success(f"✅ {msg}")
+                    else:
+                        st.warning(f"⚠️ {msg}")
+                    st.info(f"📋 {msg2}") if ok2 else st.warning(f"⚠️ Details: {msg2}"); pass
 
     # ============================================================
     # PAGE: MONTHLY SUMMARY
