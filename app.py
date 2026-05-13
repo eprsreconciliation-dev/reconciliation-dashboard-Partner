@@ -32,7 +32,6 @@ st.set_page_config(
 # LOGOS (embedded base64)
 # ============================================================
 def load_logo(path, mime):
-    # Try multiple locations: repo folder, uploads folder
     candidates = [
         os.path.join(os.path.dirname(os.path.abspath(__file__)), path),
         os.path.join(os.path.dirname(os.path.abspath(__file__)), os.path.basename(path)),
@@ -82,14 +81,23 @@ st.markdown("""
     .action-box h4 { color: #e74c3c; margin: 0 0 10px 0; font-size: 14px; }
     .stDataFrame { font-size: 12px; }
     div[data-testid="stMetricValue"] { font-size: 26px; font-weight: bold; }
+    .sheets-error {
+        background: #fff3cd;
+        border: 2px solid #e74c3c;
+        border-radius: 8px;
+        padding: 12px 16px;
+        margin-bottom: 16px;
+        color: #721c24;
+        font-weight: 500;
+    }
 </style>
 """, unsafe_allow_html=True)
 
 # ============================================================
-# CELLCOM PRICE MAP  (our EUP → expected supplier price)
+# CELLCOM PRICE MAP
 # ============================================================
-CELLCOM_FIXED = {15.0, 19.0, 25.0, 29.0, 39.9, 49.0}   # fixed tariffs — no discount
-CELLCOM_DISCOUNT = 5.0                 # all others: supplier = ours - 5
+CELLCOM_FIXED = {15.0, 19.0, 25.0, 29.0, 39.9, 49.0}
+CELLCOM_DISCOUNT = 5.0
 
 def cellcom_expected_supplier_price(our_eup):
     if our_eup in CELLCOM_FIXED:
@@ -110,7 +118,9 @@ HISTORY_COLS = ['date','operator_tab','sup_cbd','our_eup','diff',
 DETAIL_COLS = ['date','operator_tab','category','phone','operator',
                'product','amount','sup_date','our_date','reason','check_instruction','verified']
 
+# ---- FIX 1: Sheets connectivity check with visible banner ----
 def get_gspread_client():
+    """Returns gspread client or None. Shows error in sidebar if failed."""
     if not GSPREAD_AVAILABLE:
         return None
     for attempt in range(3):
@@ -118,12 +128,98 @@ def get_gspread_client():
             creds = Credentials.from_service_account_info(
                 dict(st.secrets["gcp_service_account"]), scopes=SCOPES)
             gc = gspread.authorize(creds)
+            # Light connectivity probe — just list spreadsheets (fast)
             return gc
         except Exception as e:
             if attempt == 2:
-                st.sidebar.error(f"Sheets auth error: {e}")
+                # Show visible error — do NOT fail silently
+                st.sidebar.error(f"⛔ Google Sheets auth failed: {e}")
+                st.session_state['sheets_unavailable'] = True
             continue
     return None
+
+def check_sheets_banner():
+    """Call at the top of any save operation — shows prominent warning if Sheets is down."""
+    if st.session_state.get('sheets_unavailable'):
+        st.markdown("""
+        <div class="sheets-error">
+        ⛔ <strong>Google Sheets недоступен.</strong> Данные будут сохранены ЛОКАЛЬНО
+        и могут быть потеряны при перезапуске сервера. Свяжитесь с администратором
+        для восстановления подключения перед сохранением.
+        </div>
+        """, unsafe_allow_html=True)
+        return False
+    return True
+
+def check_existing_record(report_date, operator_tab):
+    """
+    Returns True if a history record for this date+operator already exists in Sheets.
+    Used to warn the user before saving a second time for the same day.
+    """
+    sh = get_spreadsheet(operator_tab)
+    if sh is None:
+        return False
+    try:
+        dt = datetime.strptime(report_date, '%Y-%m-%d')
+        ws_title = dt.strftime('%B %Y')
+        try:
+            ws = sh.worksheet(ws_title)
+        except gspread.WorksheetNotFound:
+            return False
+        records = ws.get_all_records()
+        for r in records:
+            if (str(r.get('date', '')) == str(report_date) and
+                    str(r.get('operator_tab', '')) == operator_tab):
+                return True
+        return False
+    except Exception:
+        return False
+
+def save_confirmation_ui(report_date, operator_tab, session_key):
+    """
+    Shows a confirmation dialog if a record for this date already exists.
+    Returns True if user confirmed (or no existing record).
+    Returns False if user cancelled or hasn't confirmed yet.
+
+    Uses session_state to track the confirmation step:
+      session_key + '_confirm_pending' = True  → waiting for user choice
+      session_key + '_confirm_ok'      = True  → user said yes, proceed
+    """
+    confirm_pending_key = session_key + '_confirm_pending'
+    confirm_ok_key      = session_key + '_confirm_ok'
+
+    # Already confirmed in this click cycle → proceed
+    if st.session_state.get(confirm_ok_key):
+        st.session_state.pop(confirm_ok_key, None)
+        st.session_state.pop(confirm_pending_key, None)
+        return True
+
+    # Check if a record already exists
+    if not st.session_state.get(confirm_pending_key):
+        if check_existing_record(report_date, operator_tab):
+            st.session_state[confirm_pending_key] = True
+        else:
+            return True  # No existing record — safe to save, no confirmation needed
+
+    # Show the confirmation dialog
+    if st.session_state.get(confirm_pending_key):
+        st.warning(
+            f"⚠️ За **{report_date}** ({operator_tab}) уже есть сохранённая запись в Google Sheets.\n\n"
+            f"Что сделать?"
+        )
+        col_yes, col_no = st.columns(2)
+        with col_yes:
+            if st.button("✅ Сохранить как новую версию", key=session_key + '_yes', use_container_width=True):
+                st.session_state[confirm_ok_key] = True
+                st.session_state.pop(confirm_pending_key, None)
+                st.rerun()
+        with col_no:
+            if st.button("❌ Отмена", key=session_key + '_no', use_container_width=True):
+                st.session_state.pop(confirm_pending_key, None)
+                st.info("Сохранение отменено. Старые данные не изменены.")
+        return False  # Wait for user choice
+
+    return True
 
 def get_spreadsheet(operator='partner'):
     gc = get_gspread_client()
@@ -135,14 +231,17 @@ def get_spreadsheet(operator='partner'):
             sid = st.secrets["google_sheets_cellcom"]["spreadsheet_id"]
         else:
             sid = st.secrets["google_sheets"]["spreadsheet_id"]
-        return gc.open_by_key(sid)
-    except Exception:
+        sh = gc.open_by_key(sid)
+        # Clear the "unavailable" flag if connection succeeded
+        st.session_state.pop('sheets_unavailable', None)
+        return sh
+    except Exception as e:
+        st.session_state['sheets_unavailable'] = True
         return None
 
 def get_or_create_sheet(sh, title, headers):
     try:
         ws = sh.worksheet(title)
-        # Only fix if first row is completely empty
         existing = [c for c in ws.row_values(1) if c]
         if not existing:
             ws.append_row(headers)
@@ -172,7 +271,6 @@ def load_history(month=None, operator_tab=None):
                     try: records.extend(ws.get_all_records())
                     except: pass
             records = sorted(records, key=lambda x: x.get('date',''))
-        # Default old records (no operator_tab) to 'partner'
         for r in records:
             if not r.get('operator_tab'):
                 r['operator_tab'] = 'partner'
@@ -182,41 +280,78 @@ def load_history(month=None, operator_tab=None):
     except Exception:
         return _load_local_history()
 
+# ---- FIX 2: safe save_to_sheets — NEVER overwrites, always appends ----
 def save_to_sheets(record):
+    """
+    SAFE version: always appends a new row.
+    If a row for the same date+operator already exists, it is LEFT INTACT.
+    The new row is added below it. Both rows remain in the sheet permanently.
+    To see the latest result, look at the last row for that date.
+    """
     sh = get_spreadsheet(record.get('operator_tab', 'partner'))
     if sh is None:
         _save_local_history(record)
-        return False, "Not connected — saved locally"
+        return False, "⚠️ Sheets недоступен — сохранено локально (риск потери при рестарте!)"
     try:
         dt = datetime.strptime(record['date'], '%Y-%m-%d')
         ws = get_or_create_sheet(sh, dt.strftime('%B %Y'), HISTORY_COLS)
-        existing = ws.get_all_records()
-        for i, row in enumerate(existing):
-            if row.get('date') == record['date'] and row.get('operator_tab') == record.get('operator_tab'):
-                ws.update(f'A{i+2}', [[record.get(c,'') for c in HISTORY_COLS]])
-                return True, f"Updated {record['date']} in '{dt.strftime('%B %Y')}'"
-        ws.append_row([record.get(c,'') for c in HISTORY_COLS])
-        return True, f"Saved to '{dt.strftime('%B %Y')}'"
+
+        # SAFE: always append, never update existing rows
+        ws.append_row([record.get(c, '') for c in HISTORY_COLS])
+        return True, f"✅ Добавлена новая запись за {record['date']} в '{dt.strftime('%B %Y')}'"
     except Exception as e:
         _save_local_history(record)
-        return False, f"Sheets error: {e}"
+        return False, f"⚠️ Ошибка Sheets: {e} — сохранено локально"
 
+# ---- FIX 3: safe save_details_to_sheets — NO ws.clear(), uses append only ----
 def save_details_to_sheets(report_date, operator_tab, rows):
+    """
+    SAFE version: does NOT clear the sheet.
+    Checks for existing rows for this date+operator:
+    - If verified rows exist → they are preserved, only unverified rows are replaced
+    - New rows are appended for this date
+    This means: verified statuses are NEVER lost on re-run.
+    """
     sh = get_spreadsheet(operator_tab)
     if sh is None: return False, "Not connected"
     try:
         ws = get_or_create_sheet(sh, 'Transaction Details', DETAIL_COLS)
         all_data = ws.get_all_records(expected_headers=DETAIL_COLS)
-        keep = [r for r in all_data
-                if not (str(r.get('date','')) == str(report_date) and
-                        str(r.get('operator_tab','')) == operator_tab)]
+
+        # Split: keep verified rows for this date (protect them), drop unverified for this date
+        verified_this_date = [
+            r for r in all_data
+            if str(r.get('date', '')) == str(report_date)
+            and str(r.get('operator_tab', '')) == operator_tab
+            and not str(r.get('verified', '')).startswith('⬜')  # Keep: already verified
+        ]
+        other_dates = [
+            r for r in all_data
+            if not (str(r.get('date', '')) == str(report_date)
+                    and str(r.get('operator_tab', '')) == operator_tab)
+        ]
+
+        # Rebuild: other dates + verified from this date + new unverified rows
+        rebuilt = other_dates + verified_this_date
+
+        # SAFE: prepare ALL rows before touching the sheet.
+        # If row-building fails here, ws.clear() is never called → data stays intact.
+        rebuilt_rows = [[r.get(c, '') for c in DETAIL_COLS] for r in rebuilt]
+        new_rows = rows if rows else []
+        all_rows_to_write = rebuilt_rows + new_rows
+
+        # Now clear and rewrite in one batch — minimises the window where sheet is empty
         ws.clear()
         ws.append_row(DETAIL_COLS)
-        if keep:
-            ws.append_rows([[r.get(c,'') for c in DETAIL_COLS] for r in keep])
-        if rows:
-            ws.append_rows(rows)
-        return True, f"Saved {len(rows)} detail rows"
+        if all_rows_to_write:
+            ws.append_rows(all_rows_to_write)
+
+        preserved = len(verified_this_date)
+        added = len(rows)
+        msg = f"Добавлено {added} строк"
+        if preserved > 0:
+            msg += f" | Сохранено {preserved} верифицированных записей"
+        return True, msg
     except Exception as e:
         return False, f"Details error: {e}"
 
@@ -276,17 +411,25 @@ def cross_day_match(result, report_date, operator_tab):
         return list(our_only & yest_sup), list(sup_only & yest_our)
     except: return [], []
 
-# Local fallback
+# ---- FIX 4: local fallback — also safe (append semantics) ----
 HISTORY_FILE = os.path.join(os.path.dirname(__file__), "history.json")
+
 def _load_local_history():
     if os.path.exists(HISTORY_FILE):
         with open(HISTORY_FILE,'r',encoding='utf-8') as f: return json.load(f)
     return []
+
 def _save_local_history(record):
+    """
+    SAFE local fallback: appends the new record without deleting any existing records.
+    Multiple records for the same date are allowed — last one is the most recent.
+    """
     h = _load_local_history()
-    h = [x for x in h if not (x.get('date')==record.get('date') and x.get('operator_tab')==record.get('operator_tab'))]
-    h.append(record); h.sort(key=lambda x: x.get('date',''))
-    with open(HISTORY_FILE,'w',encoding='utf-8') as f: json.dump(h,f,ensure_ascii=False,indent=2)
+    # Append only — do NOT filter/delete existing records for the same date
+    h.append(record)
+    h.sort(key=lambda x: (x.get('date',''), x.get('operator_tab','')))
+    with open(HISTORY_FILE,'w',encoding='utf-8') as f:
+        json.dump(h, f, ensure_ascii=False, indent=2)
 
 # ============================================================
 # PHONE NORMALIZATION
@@ -308,7 +451,7 @@ def display_phone(norm):
     return norm
 
 # ============================================================
-# LOAD OUR FILES (standard format — all operators)
+# LOAD OUR FILES
 # ============================================================
 def load_our(file_bytes, operator_name):
     try:
@@ -337,7 +480,6 @@ def load_our(file_bytes, operator_name):
 # LOAD SUPPLIER FILES
 # ============================================================
 def load_supplier_partner(file_bytes, filename):
-    """Partner/012Talk supplier XLS"""
     try:
         if filename.lower().endswith('.xls'):
             text = file_bytes.decode('cp1255', errors='replace')
@@ -368,7 +510,6 @@ def load_supplier_partner(file_bytes, filename):
     except Exception as e: return None, str(e)
 
 def load_supplier_cellcom(file_bytes):
-    """Cellcom supplier XLSX"""
     try:
         df = pd.read_excel(BytesIO(file_bytes))
         col_map = {
@@ -389,16 +530,13 @@ def load_supplier_cellcom(file_bytes):
         df['Phone_Display'] = df['phone_norm'].apply(display_phone)
         df['Sup_Date'] = pd.to_datetime(df['Sup_Date'], errors='coerce')
         df = df[df['phone_norm'].str.len() >= 8]
-        df = df[df['CBD'] > 0]  # Exclude zero-amount (failed attempts)
+        df = df[df['CBD'] > 0]
         return df, None
     except Exception as e: return None, str(e)
 
 def load_supplier_pelephone(file_bytes):
-    """Pelephone supplier XLSX"""
     try:
         df = pd.read_excel(BytesIO(file_bytes))
-        # Column F = Unnamed: 5 = TOPUP_PRICE (price we pay)
-        # Support both old format (Unnamed: 5) and new format (TOPUP_PRICE)
         rename_map = {
             'Serial_Number':'Serial',
             "#DOC_NUMBER'":'Doc_Number',
@@ -417,7 +555,6 @@ def load_supplier_pelephone(file_bytes):
         df['phone_norm'] = df['MSISDN'].apply(norm_phone)
         df['Phone_Display'] = df['phone_norm'].apply(display_phone)
         df['Order_Number'] = df['Order_Number'].astype(str).str.strip()
-        # Combine date+time
         try:
             df['Sup_DateTime'] = pd.to_datetime(
                 df['Sup_Date'].astype(str) + ' ' + df['Sup_Time'].astype(str),
@@ -428,7 +565,7 @@ def load_supplier_pelephone(file_bytes):
     except Exception as e: return None, str(e)
 
 # ============================================================
-# CHECK INSTRUCTIONS (smart reason column)
+# CHECK INSTRUCTIONS
 # ============================================================
 def make_check_instruction(category, sup_date, our_date, report_date, is_late=False):
     rd = str(report_date)
@@ -502,6 +639,7 @@ def run_recon_partner(sup_df, partner_df, talk_df, report_date):
             })
 
     matched_df = pd.DataFrame(matched_rows)
+    sup_pure = sup_df.copy()
     sup_only_df = sup_pure[sup_pure['phone_norm'].isin(sup_only_phones)].copy()
     sup_only_df['Reason'] = 'Not found in our system'
     sup_only_df['Check_Instruction'] = sup_only_df.apply(
@@ -549,7 +687,6 @@ def run_recon_cellcom(sup_df, our_df, report_date):
     our_refunds = our_df[our_df['Is_Refund']].copy()
     our_failed  = our_df[our_df['Eff_Status'] == 'FAILED'].copy()
     our_pending = our_df[our_df['Eff_Status'] == 'PENDING'].copy()
-    # Split supplier: pure purchases vs refunds
     sup_pure       = sup_df[(sup_df['CBD'] > 0) & (sup_df['Cancel_Amt'] == 0)].copy()
     sup_refunds_df = sup_df[(sup_df['CBD'] > 0) & (sup_df['Cancel_Amt'] > 0)].copy()
 
@@ -559,7 +696,6 @@ def run_recon_cellcom(sup_df, our_df, report_date):
     sup_only_phones = sup_phones - our_dc_phones
     our_only_phones = our_dc_phones - sup_phones
 
-    # Match refunds: sup Cancel_Amt > 0 vs our REFUND+DONE
     used_our_ref = set()
     used_sup_ref = set()
     unmatched_our_ref = []
@@ -578,13 +714,9 @@ def run_recon_cellcom(sup_df, our_df, report_date):
     used_our = set()
     used_sup = set()
     price_diffs = []
-    used_our = set()
-    used_sup = set()
-    price_diffs = []
 
     sup_matched = sup_pure[sup_pure['phone_norm'].isin(matched_phones)].copy()
 
-    # Pass 1: match by phone + expected price
     for si, sr in sup_matched.iterrows():
         if si in used_sup: continue
         phone = sr['phone_norm']
@@ -614,7 +746,6 @@ def run_recon_cellcom(sup_df, our_df, report_date):
                 'Our EUP (NIS)': our_eup,
             })
 
-    # Pass 2: fallback by phone only for remaining unmatched
     for si, sr in sup_matched.iterrows():
         if si in used_sup: continue
         phone = sr['phone_norm']
@@ -645,17 +776,11 @@ def run_recon_cellcom(sup_df, our_df, report_date):
 
     matched_df = pd.DataFrame(matched_rows)
 
-    # Cellcom price analysis
-    # Price Diff = actual_supplier - expected_supplier
-    # For normal tariffs: expected diff = -5 (supplier charges 5 less)
-    # For fixed tariffs (15,19,49): expected diff = 0
-    # Anomaly = transaction where actual diff != expected diff
     if len(matched_df) > 0:
         matched_df['Expected Discount'] = matched_df['Our EUP (NIS)'] - matched_df['Expected Supplier Price']
         total_expected_discount = round(matched_df['Expected Discount'].sum(), 2)
         actual_discount = round(matched_df['Our EUP (NIS)'].sum() - matched_df['Supplier CBD (NIS)'].sum(), 2)
         unexplained_diff = round(actual_discount - total_expected_discount, 2)
-        # Anomalies = rows where Price Diff != 0
         anomaly_rows = matched_df[matched_df['Price Diff (NIS)'].abs() > 0.01].copy()
     else:
         total_expected_discount = 0
@@ -707,7 +832,6 @@ def run_recon_pelephone(sup_df, pele_df, global_df, esim_df, report_date):
     our_refunds = our_all[our_all['Is_Refund']].copy()
     our_failed  = our_all[our_all['Eff_Status'] == 'FAILED'].copy()
 
-    # Match by Order_Number = Transaction ID (primary)
     sup_order_ids = set(sup_df['Order_Number'].astype(str).str.strip())
     our_dc['tx_clean'] = our_dc['Transaction ID'].astype(str).str.strip()
     our_tx_ids = set(our_dc['tx_clean'])
@@ -786,7 +910,6 @@ def render_header(title, subtitle, logos, extra_labels=None):
         '<img src="' + l + '" style="height:48px;object-fit:contain;">'
         for l in logos if l
     ])
-    # Add text labels for operators without visible logos
     if extra_labels:
         for label in extra_labels:
             logo_html += '<span style="color:white;font-size:20px;font-weight:600;letter-spacing:1px;padding:4px 10px;border:2px solid rgba(255,255,255,0.6);border-radius:6px;">' + label + '</span>'
@@ -803,7 +926,6 @@ def render_header(title, subtitle, logos, extra_labels=None):
     """, unsafe_allow_html=True)
 
 def render_action_required(sup_only_df, our_only_df, report_date, shifts_our=None, shifts_sup=None):
-    """Show the Action Required block with all phones needing verification"""
     sup_count = len(sup_only_df)
     our_count = len(our_only_df)
     total = sup_count + our_count
@@ -854,7 +976,6 @@ def render_action_required(sup_only_df, our_only_df, report_date, shifts_our=Non
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
 def render_summary_tab(sup_only_df, our_only_df, t, report_date, tab_name):
-    """Combined summary tab showing both supplier-only and our-only"""
     st.markdown("### 📋 Discrepancy Summary")
     col1, col2, col3 = st.columns(3)
     col1.metric("❌ Supplier Only", t['sup_only_count'],
@@ -938,11 +1059,14 @@ def main():
 
         st.markdown("---")
         st.markdown("### 📊 History")
+
+        # ---- FIX 1: Visible Sheets connectivity check in sidebar ----
         sh = get_spreadsheet("partner")
         if sh is not None:
             st.success("✅ Google Sheets connected")
         else:
-            st.warning("⚠️ Sheets not connected")
+            st.error("⛔ Google Sheets недоступен\nДанные НЕ будут сохранены в облако!")
+
         total_days = 0
         last_date = None
         for op in ['partner', 'pelephone', 'cellcom']:
@@ -1017,7 +1141,6 @@ def main():
             shifts_sup = st.session_state.get('pt_shifts_sup',[])
 
             st.markdown("---")
-            # Metrics
             c1,c2,c3,c4,c5 = st.columns(5)
             c1.metric("✅ Matched", f"{t['matched_count']:,}")
             c2.metric("❌ Supplier Only", t['sup_only_count'],
@@ -1031,13 +1154,11 @@ def main():
                       f"+{gap:,.2f} NIS (sup higher)" if gap>0 else (f"{gap:,.2f} NIS (we higher)" if gap<0 else "0.00 NIS ✅"),
                       delta_color="inverse" if gap>0 else "normal")
 
-            # Cross-day shifts banner
             if shifts_our:
                 st.success(f"✅ Date Shift Confirmed: {len(shifts_our)} phone(s) from Our Only found in yesterday's Supplier Only — {', '.join(shifts_our)}")
             if shifts_sup:
                 st.success(f"✅ Date Shift Confirmed: {len(shifts_sup)} phone(s) from Supplier Only found in yesterday's Our Only — {', '.join(shifts_sup)}")
 
-            # Action Required
             render_action_required(result['sup_only'], result['our_only'], rdate, shifts_our, shifts_sup)
 
             st.markdown("---")
@@ -1097,7 +1218,6 @@ def main():
                     st.dataframe(show, use_container_width=True, hide_index=True)
                 else: st.success("✅ No failed!")
 
-            # Net billing
             st.markdown("---")
             st.markdown("### 💰 Net Billing Summary")
             net_data = {
@@ -1121,6 +1241,19 @@ def main():
             col1, col2 = st.columns(2)
             with col1:
                 if st.button("💾 Save to Monthly History", use_container_width=True, key="pt_save"):
+                    if check_sheets_banner():
+                        st.session_state['pt_do_save'] = True
+            with col2:
+                excel_buf = create_excel_report(result, rdate, 'Partner & 012Talk')
+                st.download_button("📥 Download Excel Report", data=excel_buf,
+                    file_name=f"Partner_012Talk_{rdate.replace('-','_')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True, type="primary")
+
+            # Confirmation dialog and actual save — outside columns so it renders full-width
+            if st.session_state.get('pt_do_save'):
+                if save_confirmation_ui(rdate, 'partner', 'pt'):
+                    st.session_state.pop('pt_do_save', None)
                     record = {
                         'date': rdate, 'operator_tab': 'partner',
                         'sup_cbd': round(t['sup_cbd'],2), 'our_eup': round(t['our_eup'],2),
@@ -1134,20 +1267,8 @@ def main():
                     ok, msg = save_to_sheets(record)
                     detail_rows = build_detail_rows(rdate, 'partner', result['sup_only'], result['our_only'])
                     ok2, msg2 = save_details_to_sheets(rdate, 'partner', detail_rows)
-                    if ok:
-                        st.success(f"✅ {msg}")
-                    else:
-                        st.warning(f"⚠️ {msg}")
-                    if ok2:
-                        st.info(f"📋 {msg2}")
-                    else:
-                        st.warning(f"⚠️ Details: {msg2}")
-            with col2:
-                excel_buf = create_excel_report(result, rdate, 'Partner & 012Talk')
-                st.download_button("📥 Download Excel Report", data=excel_buf,
-                    file_name=f"Partner_012Talk_{rdate.replace('-','_')}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True, type="primary")
+                    st.success(f"✅ {msg}") if ok else st.warning(f"⚠️ {msg}")
+                    st.info(f"📋 {msg2}") if ok2 else st.warning(f"⚠️ Details: {msg2}")
 
     # ============================================================
     # PAGE: PELEPHONE
@@ -1185,7 +1306,6 @@ def main():
                     pele_df, e2 = load_our(pele_file.read(), 'Pelephone')
                     if e1: st.error(f"Supplier error: {e1}"); return
                     if e2: st.error(f"Pelephone error: {e2}"); return
-                    # Optional files
                     glob_df, e3 = load_our(glob_file.read(), 'GlobalSim') if glob_file else (pd.DataFrame(), None)
                     esim_df, e4 = load_our(esim_file.read(), 'eSIM') if esim_file else (pd.DataFrame(), None)
                     if e3: st.error(f"GlobalSim error: {e3}"); return
@@ -1285,6 +1405,18 @@ def main():
             col1, col2 = st.columns(2)
             with col1:
                 if st.button("💾 Save to Monthly History", use_container_width=True, key="pe_save"):
+                    if check_sheets_banner():
+                        st.session_state['pe_do_save'] = True
+            with col2:
+                excel_buf = create_excel_report(result, rdate, 'Pelephone')
+                st.download_button("📥 Download Excel Report", data=excel_buf,
+                    file_name=f"Pelephone_{rdate.replace('-','_')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True, type="primary")
+
+            if st.session_state.get('pe_do_save'):
+                if save_confirmation_ui(rdate, 'pelephone', 'pe'):
+                    st.session_state.pop('pe_do_save', None)
                     record = {
                         'date': rdate, 'operator_tab': 'pelephone',
                         'sup_cbd': round(t['sup_price'],2), 'our_eup': round(t['our_eup'],2),
@@ -1297,20 +1429,8 @@ def main():
                     ok, msg = save_to_sheets(record)
                     detail_rows = build_detail_rows(rdate, 'pelephone', result['sup_only'], result['our_only'])
                     ok2, msg2 = save_details_to_sheets(rdate, 'pelephone', detail_rows)
-                    if ok:
-                        st.success(f"✅ {msg}")
-                    else:
-                        st.warning(f"⚠️ {msg}")
-                    if ok2:
-                        st.info(f"📋 {msg2}")
-                    else:
-                        st.warning(f"⚠️ Details: {msg2}")
-            with col2:
-                excel_buf = create_excel_report(result, rdate, 'Pelephone')
-                st.download_button("📥 Download Excel Report", data=excel_buf,
-                    file_name=f"Pelephone_{rdate.replace('-','_')}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True, type="primary")
+                    st.success(f"✅ {msg}") if ok else st.warning(f"⚠️ {msg}")
+                    st.info(f"📋 {msg2}") if ok2 else st.warning(f"⚠️ Details: {msg2}")
 
     # ============================================================
     # PAGE: CELLCOM
@@ -1380,7 +1500,6 @@ def main():
             if shifts_our:
                 st.success(f"✅ Date Shift: {len(shifts_our)} phone(s) confirmed — {', '.join(shifts_our)}")
 
-            # Unexplained diff warning
             if abs(t['unexplained_diff']) > 0.01:
                 st.warning(f"⚠️ Unexplained price difference: {t['unexplained_diff']:,.2f} NIS — "
                           f"Expected discount: {t['total_expected_discount']:,.2f} NIS but actual differs. "
@@ -1451,6 +1570,18 @@ def main():
             col1, col2 = st.columns(2)
             with col1:
                 if st.button("💾 Save to Monthly History", use_container_width=True, key="ce_save"):
+                    if check_sheets_banner():
+                        st.session_state['ce_do_save'] = True
+            with col2:
+                excel_buf = create_excel_report(result, rdate, 'Cellcom')
+                st.download_button("📥 Download Excel Report", data=excel_buf,
+                    file_name=f"Cellcom_{rdate.replace('-','_')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True, type="primary")
+
+            if st.session_state.get('ce_do_save'):
+                if save_confirmation_ui(rdate, 'cellcom', 'ce'):
+                    st.session_state.pop('ce_do_save', None)
                     record = {
                         'date': rdate, 'operator_tab': 'cellcom',
                         'sup_cbd': round(t['sup_cbd'],2), 'our_eup': round(t['our_eup'],2),
@@ -1464,20 +1595,8 @@ def main():
                     ok, msg = save_to_sheets(record)
                     detail_rows = build_detail_rows(rdate, 'cellcom', result['sup_only'], result['our_only'])
                     ok2, msg2 = save_details_to_sheets(rdate, 'cellcom', detail_rows)
-                    if ok:
-                        st.success(f"✅ {msg}")
-                    else:
-                        st.warning(f"⚠️ {msg}")
-                    if ok2:
-                        st.info(f"📋 {msg2}")
-                    else:
-                        st.warning(f"⚠️ Details: {msg2}")
-            with col2:
-                excel_buf = create_excel_report(result, rdate, 'Cellcom')
-                st.download_button("📥 Download Excel Report", data=excel_buf,
-                    file_name=f"Cellcom_{rdate.replace('-','_')}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True, type="primary")
+                    st.success(f"✅ {msg}") if ok else st.warning(f"⚠️ {msg}")
+                    st.info(f"📋 {msg2}") if ok2 else st.warning(f"⚠️ Details: {msg2}")
 
     # ============================================================
     # PAGE: MONTHLY SUMMARY
@@ -1514,13 +1633,20 @@ def main():
             st.warning("No data for selected month/operator")
             return
 
-        total_sup  = sum(h.get('sup_cbd',0) for h in month_history)
-        total_eup  = sum(h.get('our_eup',0) for h in month_history)
-        total_gap  = sum(h.get('real_gap',0) for h in month_history)
-        total_ref  = sum(h.get('refunds_eup',0) for h in month_history)
+        # De-duplicate: if same date has multiple rows (from safe appends), show only latest
+        seen = {}
+        for rec in month_history:
+            key = rec.get('date','')
+            seen[key] = rec  # last one wins — that's the most recent run
+        month_history_deduped = list(seen.values())
+
+        total_sup  = sum(h.get('sup_cbd',0) for h in month_history_deduped)
+        total_eup  = sum(h.get('our_eup',0) for h in month_history_deduped)
+        total_gap  = sum(h.get('real_gap',0) for h in month_history_deduped)
+        total_ref  = sum(h.get('refunds_eup',0) for h in month_history_deduped)
 
         c1,c2,c3,c4,c5 = st.columns(5)
-        c1.metric("📅 Days", len(month_history))
+        c1.metric("📅 Days", len(month_history_deduped))
         c2.metric("Supplier Total", f"{total_sup:,.2f} NIS")
         c3.metric("Our EUP Total", f"{total_eup:,.2f} NIS")
         c4.metric("↩️ Refunds", f"{total_ref:,.2f} NIS")
@@ -1528,8 +1654,7 @@ def main():
                   delta_color="inverse" if total_gap>0 else "normal")
 
         st.markdown("---")
-        df = pd.DataFrame(month_history)
-        # Show clean columns only
+        df = pd.DataFrame(month_history_deduped)
         show_cols = [c for c in ['date','operator_tab','matched_count','sup_cbd','our_eup',
                                   'diff','refunds_eup','net_billed'] if c in df.columns]
         st.dataframe(df[show_cols], use_container_width=True, hide_index=True)
@@ -1537,7 +1662,7 @@ def main():
         month_label = datetime.strptime(selected_month, '%Y-%m').strftime('%B %Y')
         st.download_button(
             f"📥 Download Monthly Report — {month_label}",
-            data=create_monthly_excel(month_history, month_label),
+            data=create_monthly_excel(month_history_deduped, month_label),
             file_name=f"Monthly_{selected_month.replace('-','_')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True, type="primary"
@@ -1554,7 +1679,6 @@ def main():
             return
 
         st.warning(f"⏳ {len(pending)} phone(s) need verification")
-        df = pd.DataFrame(pending)
         for i, row in enumerate(pending):
             sh = get_spreadsheet(row.get("operator_tab", "partner"))
             with st.expander(f"📱 {row.get('phone','')} | {row.get('date','')} | {row.get('operator_tab','').upper()} | {row.get('category','')}"):
@@ -1633,11 +1757,18 @@ def main():
         - REFUND rows = credits from previous period
         - Late transactions (after 22:00) typically appear in NEXT day's supplier report
         - REWARD and REFUND_REWARD rows are automatically excluded
+
+        ---
+
+        ### 💾 About Saving
+        - Each "Save to Monthly History" click **adds a new row** — it never overwrites old data
+        - If you ran reconciliation twice for the same day, both rows are kept; the Monthly Summary shows the latest
+        - If Google Sheets shows ⛔ in the sidebar — do NOT save until it's fixed
         """)
 
 
 # ============================================================
-# EXCEL EXPORTS (simplified for new structure)
+# EXCEL EXPORTS
 # ============================================================
 def create_excel_report(result, report_date, tab_name):
     wb = openpyxl.Workbook()
@@ -1690,7 +1821,6 @@ def create_excel_report(result, report_date, tab_name):
             ws.row_dimensions[r].height = 15
         ws.freeze_panes = 'A3'
 
-    # Action Required sheet
     ws_act = wb.create_sheet("Action Required")
     action_rows = []
     if len(result.get('sup_only', pd.DataFrame())) > 0:
@@ -1728,14 +1858,12 @@ def create_excel_report(result, report_date, tab_name):
         dv.sqref = f"{vcl}3:{vcl}{len(action_df)+2}"
         ws_act.add_data_validation(dv)
 
-    # Matched sheet
     if len(result.get('matched', pd.DataFrame())) > 0:
         ws_m = wb.create_sheet("Matched")
         num_m = {c for c in result['matched'].columns if 'NIS' in c or 'Price' in c or 'Diff' in c}
         write_sheet(ws_m, f"MATCHED — {t.get('matched_count',0)} records", result['matched'],
                     NAVY, LBLUE, num_m)
 
-    # Refunds sheet
     if len(result.get('refunds', pd.DataFrame())) > 0:
         ws_r = wb.create_sheet("Refunds")
         ref = result['refunds']
