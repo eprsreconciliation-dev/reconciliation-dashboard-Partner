@@ -298,7 +298,7 @@ def save_to_sheets(record):
 
         # SAFE: always append, never update existing rows
         ws.append_row([record.get(c, '') for c in HISTORY_COLS])
-        return True, f"✅ New record added for {record['date']} в '{dt.strftime('%B %Y')}'"
+        return True, f"New record added for {record['date']} in '{dt.strftime('%B %Y')}'"
     except Exception as e:
         _save_local_history(record)
         return False, f"⚠️ Sheets error: {e} — saved locally"
