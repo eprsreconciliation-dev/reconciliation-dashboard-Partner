@@ -204,7 +204,7 @@ def save_confirmation_ui(report_date, operator_tab, session_key):
     # Show the confirmation dialog
     if st.session_state.get(confirm_pending_key):
         st.warning(
-            f"⚠️ За **{report_date}** ({operator_tab}) уже есть сохранённая запись в Google Sheets.\n\n"
+            f"⚠️ Record for **{report_date}** ({operator_tab}) already exists in Google Sheets.\n\n"
             f"What would you like to do?"
         )
         col_yes, col_no = st.columns(2)
@@ -214,7 +214,7 @@ def save_confirmation_ui(report_date, operator_tab, session_key):
                 st.session_state.pop(confirm_pending_key, None)
                 st.rerun()
         with col_no:
-            if st.button("❌ Отмена", key=session_key + '_no', use_container_width=True):
+            if st.button("❌ Cancel", key=session_key + '_no', use_container_width=True):
                 st.session_state.pop(confirm_pending_key, None)
                 st.info("Save cancelled. Existing data unchanged.")
         return False  # Wait for user choice
@@ -291,7 +291,7 @@ def save_to_sheets(record):
     sh = get_spreadsheet(record.get('operator_tab', 'partner'))
     if sh is None:
         _save_local_history(record)
-        return False, "⚠️ Sheets недоступен — saved locally (риск потери при рестарте!)"
+        return False, "⚠️ Sheets unavailable — saved locally (risk of loss on restart!)"
     try:
         dt = datetime.strptime(record['date'], '%Y-%m-%d')
         ws = get_or_create_sheet(sh, dt.strftime('%B %Y'), HISTORY_COLS)
@@ -348,9 +348,9 @@ def save_details_to_sheets(report_date, operator_tab, rows):
 
         preserved = len(verified_this_date)
         added = len(rows)
-        msg = f"Добавлено {added} строк"
+        msg = f"Added {added} rows"
         if preserved > 0:
-            msg += f" | Сохранено {preserved} верифицированных записей"
+            msg += f" | Preserved {preserved} verified records"
         return True, msg
     except Exception as e:
         return False, f"Details error: {e}"
