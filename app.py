@@ -1275,7 +1275,10 @@ def main():
                         st.success(f"✅ {msg}")
                     else:
                         st.warning(f"⚠️ {msg}")
-                    st.info(f"📋 {msg2}") if ok2 else st.warning(f"⚠️ Details: {msg2}"); pass
+                    if ok2:
+                        st.info(f"📋 {msg2}")
+                    else:
+                        st.warning(f"⚠️ Details: {msg2}")
 
     # ============================================================
     # PAGE: PELEPHONE
@@ -1440,7 +1443,10 @@ def main():
                         st.success(f"✅ {msg}")
                     else:
                         st.warning(f"⚠️ {msg}")
-                    st.info(f"📋 {msg2}") if ok2 else st.warning(f"⚠️ Details: {msg2}"); pass
+                    if ok2:
+                        st.info(f"📋 {msg2}")
+                    else:
+                        st.warning(f"⚠️ Details: {msg2}")
 
     # ============================================================
     # PAGE: CELLCOM
@@ -1609,7 +1615,10 @@ def main():
                         st.success(f"✅ {msg}")
                     else:
                         st.warning(f"⚠️ {msg}")
-                    st.info(f"📋 {msg2}") if ok2 else st.warning(f"⚠️ Details: {msg2}"); pass
+                    if ok2:
+                        st.info(f"📋 {msg2}")
+                    else:
+                        st.warning(f"⚠️ Details: {msg2}")
 
     # ============================================================
     # PAGE: MONTHLY SUMMARY
