@@ -119,28 +119,22 @@ DETAIL_COLS = ['date','operator_tab','category','phone','operator',
                'product','amount','sup_date','our_date','reason','check_instruction','verified']
 
 # ---- FIX 1: Sheets connectivity check with visible banner ----
+@st.cache_resource(show_spinner=False)
 def get_gspread_client():
-    """Returns gspread client or None. Shows error in sidebar if failed."""
+    """Returns gspread client or None. Cached — created once, reused across rerenders."""
     if not GSPREAD_AVAILABLE:
         return None
-    for attempt in range(3):
-        try:
-            creds = Credentials.from_service_account_info(
-                dict(st.secrets["gcp_service_account"]), scopes=SCOPES)
-            gc = gspread.authorize(creds)
-            # Light connectivity probe — just list spreadsheets (fast)
-            return gc
-        except Exception as e:
-            if attempt == 2:
-                # Show visible error — do NOT fail silently
-                st.sidebar.error(f"⛔ Google Sheets auth failed: {e}")
-                st.session_state['sheets_unavailable'] = True
-            continue
-    return None
+    try:
+        creds = Credentials.from_service_account_info(
+            dict(st.secrets["gcp_service_account"]), scopes=SCOPES)
+        gc = gspread.authorize(creds)
+        return gc
+    except Exception as e:
+        return None
 
 def check_sheets_banner():
     """Call at the top of any save operation — shows prominent warning if Sheets is down."""
-    if st.session_state.get('sheets_unavailable'):
+    if get_spreadsheet("partner") is None:
         st.markdown("""
         <div class="sheets-error">
         ⛔ <strong>Google Sheets unavailable.</strong> Data will be saved LOCALLY
@@ -236,11 +230,8 @@ def get_spreadsheet(operator='partner'):
         else:
             sid = st.secrets["google_sheets"]["spreadsheet_id"]
         sh = gc.open_by_key(sid)
-        # Clear the "unavailable" flag if connection succeeded
-        st.session_state.pop('sheets_unavailable', None)
         return sh
     except Exception as e:
-        st.session_state['sheets_unavailable'] = True
         return None
 
 def get_or_create_sheet(sh, title, headers):
