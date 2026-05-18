@@ -378,15 +378,22 @@ def update_verification(sh, phone, date_val, operator_tab, new_status):
     try:
         ws = sh.worksheet('Transaction Details')
         records = ws.get_all_records(expected_headers=DETAIL_COLS)
+        phone_str = str(phone).strip()
+        date_str  = str(date_val).strip()
+        col = DETAIL_COLS.index('verified') + 1
         for i, r in enumerate(records):
-            if (str(r.get('phone','')) == str(phone) and
-                str(r.get('date','')) == str(date_val) and
-                str(r.get('operator_tab','')) == operator_tab):
-                col = DETAIL_COLS.index('verified') + 1
-                ws.update_cell(i+2, col, new_status)
-                return True
-    except: pass
-    return False
+            r_phone = str(r.get('phone', '')).strip()
+            r_date  = str(r.get('date', '')).strip()
+            r_op    = str(r.get('operator_tab', '')).strip()
+            phone_match = (r_phone == phone_str or
+                          r_phone == phone_str.lstrip('0') or
+                          '0' + r_phone == phone_str)
+            if phone_match and r_date == date_str and r_op == operator_tab:
+                ws.update_cell(i + 2, col, new_status)
+                return True, f"Updated {phone_str}"
+        return False, f"Phone {phone_str} not found for {date_str} / {operator_tab}"
+    except Exception as e:
+        return False, f"Sheets error: {e}"
 
 def cross_day_match(result, report_date, operator_tab):
     sh = get_spreadsheet(operator_tab)
@@ -1687,12 +1694,27 @@ def main():
     elif page == "⏳ Pending Verification":
         render_header("Pending Verification", "Phones awaiting manual check", [LOGO_PAYX])
         pending = load_pending_verifications()
+
         if not pending:
             st.success("✅ Nothing pending — all verified!")
             return
 
-        st.warning(f"⏳ {len(pending)} phone(s) need verification")
-        for i, row in enumerate(pending):
+        # Operator filter
+        operators_in_pending = sorted(set(r.get('operator_tab','') for r in pending))
+        col_f1, col_f2 = st.columns([1, 3])
+        with col_f1:
+            op_filter = st.selectbox(
+                "Filter by operator:",
+                ["All"] + operators_in_pending,
+                key="pend_op_filter"
+            )
+        pending_filtered = pending if op_filter == "All" else [r for r in pending if r.get('operator_tab','') == op_filter]
+
+        total = len(pending)
+        shown = len(pending_filtered)
+        st.warning(f"⏳ {shown} phone(s) shown — {total} total pending across all operators")
+
+        for i, row in enumerate(pending_filtered):
             sh = get_spreadsheet(row.get("operator_tab", "partner"))
             with st.expander(f"📱 {row.get('phone','')} | {row.get('date','')} | {row.get('operator_tab','').upper()} | {row.get('category','')}"):
                 c1,c2 = st.columns(2)
@@ -1708,9 +1730,17 @@ def main():
                     key=f"pend_{i}"
                 )
                 if st.button("Save", key=f"pend_save_{i}"):
-                    if sh and update_verification(sh, row.get('phone',''), row.get('date',''), row.get('operator_tab',''), new_status):
-                        st.success("Updated!")
-                        st.rerun()
+                    if sh:
+                        ok, msg = update_verification(
+                            sh, row.get('phone',''), row.get('date',''),
+                            row.get('operator_tab',''), new_status)
+                        if ok:
+                            st.success(f"✅ {msg}")
+                            st.rerun()
+                        else:
+                            st.error(f"❌ {msg}")
+                    else:
+                        st.error("❌ Google Sheets not connected")
 
     # ============================================================
     # PAGE: VERIFIED
