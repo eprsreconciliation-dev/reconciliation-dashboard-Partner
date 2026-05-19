@@ -1708,13 +1708,11 @@ def main():
 
         # Operator filter
         operators_in_pending = sorted(set(r.get('operator_tab','') for r in pending))
-        col_f1, col_f2 = st.columns([1, 3])
-        with col_f1:
-            op_filter = st.selectbox(
-                "Filter by operator:",
-                ["All"] + operators_in_pending,
-                key="pend_op_filter"
-            )
+        op_filter = st.selectbox(
+            "Filter by operator:",
+            ["All"] + operators_in_pending,
+            key="pend_op_filter"
+        )
         pending_filtered = pending if op_filter == "All" else [r for r in pending if r.get('operator_tab','') == op_filter]
 
         total = len(pending)
