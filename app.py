@@ -119,7 +119,6 @@ DETAIL_COLS = ['date','operator_tab','category','phone','operator',
                'product','amount','sup_date','our_date','reason','check_instruction','verified']
 
 # ---- FIX 1: Sheets connectivity check with visible banner ----
-@st.cache_resource(show_spinner=False)
 def get_gspread_client():
     """Returns gspread client or None. Cached — created once, reused across rerenders."""
     if not GSPREAD_AVAILABLE:
