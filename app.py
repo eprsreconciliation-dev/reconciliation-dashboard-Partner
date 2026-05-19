@@ -124,8 +124,10 @@ def get_gspread_client():
     if not GSPREAD_AVAILABLE:
         return None
     try:
-        creds = Credentials.from_service_account_info(
-            dict(st.secrets["gcp_service_account"]), scopes=SCOPES)
+        info = dict(st.secrets["gcp_service_account"])
+        if 'private_key' in info:
+            info['private_key'] = info['private_key'].replace('\\n', '\n')
+        creds = Credentials.from_service_account_info(info, scopes=SCOPES)
         gc = gspread.authorize(creds)
         return gc
     except Exception as e:
