@@ -1715,7 +1715,12 @@ def main():
 
         for i, row in enumerate(pending_filtered):
             sh = get_spreadsheet(row.get("operator_tab", "partner"))
-            with st.expander(f"📱 {row.get('phone','')} | {row.get('date','')} | {row.get('operator_tab','').upper()} | {row.get('category','')}"):
+            raw_phone = str(row.get('phone','')).strip().replace('.0','')
+            if raw_phone and not raw_phone.startswith('0') and len(raw_phone) >= 9:
+                display_ph = '0' + raw_phone
+            else:
+                display_ph = raw_phone
+            with st.expander(f"📱 {display_ph} | {row.get('date','')} | {row.get('operator_tab','').upper()} | {row.get('category','')}"):
                 c1,c2 = st.columns(2)
                 c1.write(f"**Product:** {row.get('product','')}")
                 c1.write(f"**Amount:** {row.get('amount','')} NIS")
@@ -1731,7 +1736,7 @@ def main():
                 if st.button("Save", key=f"pend_save_{i}"):
                     if sh:
                         ok, msg = update_verification(
-                            sh, row.get('phone',''), row.get('date',''),
+                            sh, raw_phone, row.get('date',''),
                             row.get('operator_tab',''), new_status)
                         if ok:
                             st.success(f"✅ {msg}")
