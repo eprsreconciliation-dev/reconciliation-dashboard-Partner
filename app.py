@@ -1087,6 +1087,12 @@ def main():
     # ============================================================
     # PAGE: PARTNER + 012TALK
     # ============================================================
+    # Clear save flags when switching pages
+    for _key in ['pt_do_save', 'pe_do_save', 'ce_do_save']:
+        if _key in st.session_state and not page.startswith(
+            {'pt': '📱', 'pe': '⭐', 'ce': '📡'}[_key[:2]]):
+            st.session_state.pop(_key, None)
+
     if page == "📱 Partner + 012Talk Reconciliation":
         render_header(
             "Partner + 012Talk Reconciliation",
