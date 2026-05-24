@@ -372,7 +372,7 @@ def load_verified():
         try:
             ws = get_or_create_sheet(sh, 'Transaction Details', DETAIL_COLS)
             records = ws.get_all_records(expected_headers=DETAIL_COLS)
-            all_records.extend([r for r in records if not str(r.get('verified','')).startswith('⬜')])
+            all_records.extend([r for r in records if str(r.get('verified','')).startswith('✅') or str(r.get('verified','')).startswith('❌')])
         except: pass
     return all_records
 
