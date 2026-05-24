@@ -139,7 +139,7 @@ def get_gspread_client():
 
 def check_sheets_banner():
     """Call at the top of any save operation — shows prominent warning if Sheets is down."""
-    if not _sheets_connected():
+    if get_spreadsheet("partner") is None:
         st.markdown("""
         <div class="sheets-error">
         ⛔ <strong>Google Sheets unavailable.</strong> Data will be saved LOCALLY
@@ -1069,7 +1069,7 @@ def main():
         st.markdown("### 📊 History")
 
         # Cached connectivity check — no live API call on every rerender
-        if _sheets_connected():
+        if get_spreadsheet("partner") is not None:
             st.success("✅ Google Sheets connected")
         else:
             st.error("⛔ Google Sheets unavailable\nData will NOT be saved to the cloud!")
