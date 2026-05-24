@@ -139,7 +139,7 @@ def get_gspread_client():
 
 def check_sheets_banner():
     """Call at the top of any save operation — shows prominent warning if Sheets is down."""
-    if get_spreadsheet("partner") is None:
+    if not _sheets_connected():
         st.markdown("""
         <div class="sheets-error">
         ⛔ <strong>Google Sheets unavailable.</strong> Data will be saved LOCALLY
