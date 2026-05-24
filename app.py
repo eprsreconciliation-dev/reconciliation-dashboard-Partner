@@ -252,6 +252,7 @@ def _is_month_sheet(title):
               'July','August','September','October','November','December']
     return any(m in title for m in months)
 
+@st.cache_data(ttl=30, show_spinner=False)
 def load_history(month=None, operator_tab=None):
     sh = get_spreadsheet(operator_tab or 'partner')
     if sh is None: return _load_local_history()
@@ -351,6 +352,7 @@ def save_details_to_sheets(report_date, operator_tab, rows):
     except Exception as e:
         return False, f"Details error: {e}"
 
+@st.cache_data(ttl=30, show_spinner=False)
 def load_pending_verifications():
     all_records = []
     for op in ['partner', 'pelephone', 'cellcom']:
@@ -363,6 +365,7 @@ def load_pending_verifications():
         except: pass
     return all_records
 
+@st.cache_data(ttl=30, show_spinner=False)
 def load_verified():
     all_records = []
     for op in ['partner', 'pelephone', 'cellcom']:
@@ -1277,6 +1280,7 @@ def main():
                     detail_rows = build_detail_rows(rdate, 'partner', result['sup_only'], result['our_only'])
                     ok2, msg2 = save_details_to_sheets(rdate, 'partner', detail_rows)
                     if ok:
+                        st.cache_data.clear()
                         st.success(f"✅ {msg}")
                     else:
                         st.warning(f"⚠️ {msg}")
@@ -1746,6 +1750,7 @@ def main():
                             row.get('operator_tab',''), new_status)
                         if ok:
                             st.success(f"✅ {msg}")
+                            st.cache_data.clear()
                             st.rerun()
                         else:
                             st.error(f"❌ {msg}")
