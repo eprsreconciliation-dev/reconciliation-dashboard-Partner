@@ -352,7 +352,6 @@ def save_details_to_sheets(report_date, operator_tab, rows):
     except Exception as e:
         return False, f"Details error: {e}"
 
-@st.cache_data(ttl=30, show_spinner=False)
 def load_pending_verifications():
     all_records = []
     for op in ['partner', 'pelephone', 'cellcom']:
@@ -365,7 +364,6 @@ def load_pending_verifications():
         except: pass
     return all_records
 
-@st.cache_data(ttl=30, show_spinner=False)
 def load_verified():
     all_records = []
     for op in ['partner', 'pelephone', 'cellcom']:
