@@ -1711,14 +1711,31 @@ def main():
             st.success("✅ Nothing pending — all verified!")
             return
 
-        # Operator filter
+        # Operator filter — persisted in session_state so it survives st.rerun()
         operators_in_pending = sorted(set(r.get('operator_tab','') for r in pending))
-        op_filter = st.selectbox(
-            "Filter by operator:",
-            ["All"] + operators_in_pending,
-            key="pend_op_filter"
-        )
+        if 'pend_op_filter_val' not in st.session_state:
+            st.session_state['pend_op_filter_val'] = 'All'
+
+        col_f1, col_f2 = st.columns([1, 2])
+        with col_f1:
+            op_filter = st.selectbox(
+                "Filter by operator:",
+                ["All"] + operators_in_pending,
+                index=(["All"] + operators_in_pending).index(st.session_state['pend_op_filter_val'])
+                    if st.session_state['pend_op_filter_val'] in ["All"] + operators_in_pending else 0,
+                key="pend_op_filter"
+            )
+            st.session_state['pend_op_filter_val'] = op_filter
+        with col_f2:
+            phone_search = st.text_input("🔍 Search by phone number:", key="pend_phone_search", placeholder="e.g. 0541234567")
+
         pending_filtered = pending if op_filter == "All" else [r for r in pending if r.get('operator_tab','') == op_filter]
+
+        # Apply phone search filter
+        if phone_search.strip():
+            search_norm = phone_search.strip().lstrip('0')
+            pending_filtered = [r for r in pending_filtered
+                               if search_norm in str(r.get('phone','')).replace('.0','').lstrip('0')]
 
         total = len(pending)
         shown = len(pending_filtered)
@@ -1738,10 +1755,20 @@ def main():
                 c1.write(f"**Date:** {row.get('our_date','') or row.get('sup_date','')}")
                 c2.write("**What to check:**")
                 c2.info(row.get('check_instruction',''))
+
+                # Status options — extra option for Pelephone
+                status_options = [
+                    "⬜ Not checked",
+                    "✅ Found — OK (date shift confirmed)",
+                    "✅ Found in our reports",
+                    "❌ Not found — investigate",
+                ]
+                if row.get('operator_tab','') == 'pelephone':
+                    status_options.append("↩️ Duplicate — refund issued")
+
                 new_status = st.selectbox(
                     "Update status:",
-                    ["⬜ Not checked", "✅ Found — OK (date shift confirmed)",
-                     "✅ Found in our reports", "❌ Not found — investigate"],
+                    status_options,
                     key=f"pend_{i}"
                 )
                 if st.button("Save", key=f"pend_save_{i}"):
