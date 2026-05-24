@@ -1068,9 +1068,8 @@ def main():
         st.markdown("---")
         st.markdown("### 📊 History")
 
-        # ---- FIX 1: Visible Sheets connectivity check in sidebar ----
-        sh = get_spreadsheet("partner")
-        if sh is not None:
+        # Cached connectivity check — no live API call on every rerender
+        if _sheets_connected():
             st.success("✅ Google Sheets connected")
         else:
             st.error("⛔ Google Sheets unavailable\nData will NOT be saved to the cloud!")
