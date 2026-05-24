@@ -358,14 +358,23 @@ def save_details_to_sheets(report_date, operator_tab, rows):
 
 def load_pending_verifications():
     all_records = []
+    errors = []
     for op in ['partner', 'pelephone', 'cellcom']:
         sh = get_spreadsheet(op)
-        if sh is None: continue
+        if sh is None:
+            errors.append(f"{op}: not connected")
+            continue
         try:
             ws = get_or_create_sheet(sh, 'Transaction Details', DETAIL_COLS)
             records = ws.get_all_records(expected_headers=DETAIL_COLS)
             all_records.extend([r for r in records if str(r.get('verified','')).startswith('⬜')])
-        except: pass
+        except Exception as e:
+            errors.append(f"{op}: {str(e)[:60]}")
+    if errors:
+        # Store errors in session state to display in UI
+        st.session_state['pending_load_errors'] = errors
+    else:
+        st.session_state.pop('pending_load_errors', None)
     return all_records
 
 def load_verified():
