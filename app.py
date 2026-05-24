@@ -120,18 +120,22 @@ DETAIL_COLS = ['date','operator_tab','category','phone','operator',
 
 # ---- FIX 1: Sheets connectivity check with visible banner ----
 def get_gspread_client():
-    """Returns gspread client or None. Cached — created once, reused across rerenders."""
+    """Returns gspread client or None. Retries 3x for cold start."""
     if not GSPREAD_AVAILABLE:
         return None
-    try:
-        info = dict(st.secrets["gcp_service_account"])
-        if 'private_key' in info:
-            info['private_key'] = info['private_key'].replace('\\n', '\n')
-        creds = Credentials.from_service_account_info(info, scopes=SCOPES)
-        gc = gspread.authorize(creds)
-        return gc
-    except Exception as e:
-        return None
+    import time
+    for attempt in range(3):
+        try:
+            info = dict(st.secrets["gcp_service_account"])
+            if 'private_key' in info:
+                info['private_key'] = info['private_key'].replace('\\n', '\n')
+            creds = Credentials.from_service_account_info(info, scopes=SCOPES)
+            gc = gspread.authorize(creds)
+            return gc
+        except Exception:
+            if attempt < 2:
+                time.sleep(1)
+    return None
 
 def check_sheets_banner():
     """Call at the top of any save operation — shows prominent warning if Sheets is down."""
