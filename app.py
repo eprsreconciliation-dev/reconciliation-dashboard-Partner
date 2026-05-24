@@ -1716,18 +1716,15 @@ def main():
         if 'pend_op_filter_val' not in st.session_state:
             st.session_state['pend_op_filter_val'] = 'All'
 
-        col_f1, col_f2 = st.columns([1, 2])
-        with col_f1:
-            op_filter = st.selectbox(
-                "Filter by operator:",
-                ["All"] + operators_in_pending,
-                index=(["All"] + operators_in_pending).index(st.session_state['pend_op_filter_val'])
-                    if st.session_state['pend_op_filter_val'] in ["All"] + operators_in_pending else 0,
-                key="pend_op_filter"
-            )
-            st.session_state['pend_op_filter_val'] = op_filter
-        with col_f2:
-            phone_search = st.text_input("🔍 Search by phone number:", key="pend_phone_search", placeholder="e.g. 0541234567")
+        op_filter = st.selectbox(
+            "Filter by operator:",
+            ["All"] + operators_in_pending,
+            index=(["All"] + operators_in_pending).index(st.session_state['pend_op_filter_val'])
+                if st.session_state['pend_op_filter_val'] in ["All"] + operators_in_pending else 0,
+            key="pend_op_filter"
+        )
+        st.session_state['pend_op_filter_val'] = op_filter
+        phone_search = st.text_input("🔍 Search by phone number:", key="pend_phone_search", placeholder="e.g. 0541234567")
 
         pending_filtered = pending if op_filter == "All" else [r for r in pending if r.get('operator_tab','') == op_filter]
 
