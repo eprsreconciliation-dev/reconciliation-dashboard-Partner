@@ -569,6 +569,9 @@ def load_supplier_pelephone(file_bytes):
         }
         if 'Unnamed: 5' in df.columns:
             rename_map['Unnamed: 5'] = 'TOPUP_PRICE'
+        unnamed_cols = [c for c in df.columns if str(c).startswith('Unnamed')]
+        if 'MSISDN' not in df.columns and 'SUBSCRIBER' not in df.columns and unnamed_cols:
+            rename_map[unnamed_cols[-1]] = 'MSISDN'
         df.rename(columns=rename_map, inplace=True)
         df['TOPUP_PRICE'] = pd.to_numeric(df.get('TOPUP_PRICE',0), errors='coerce').fillna(0)
         df['phone_norm'] = df['MSISDN'].apply(norm_phone)
