@@ -1796,7 +1796,8 @@ def main():
                 new_status = st.selectbox(
                     "Update status:",
                     ["⬜ Not checked", "✅ Found — OK (date shift confirmed)",
-                     "✅ Found in our reports", "❌ Not found — investigate"],
+                     "✅ Found in our reports", "❌ Not found — investigate",
+                     "🔵 Duplicate — refund issued to client"],
                     key=f"pend_{i}"
                 )
                 if st.button("Save", key=f"pend_save_{i}"):
