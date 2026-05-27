@@ -57,6 +57,7 @@ LOGO_CELL    = load_logo("logos/cellcom.png", "png")
 # ============================================================
 st.markdown("""
 <style>
+    #MainMenu {visibility: hidden;}
     .main-header {
         background: linear-gradient(135deg, #1F3864, #2E75B6);
         color: white;
@@ -119,8 +120,9 @@ DETAIL_COLS = ['date','operator_tab','category','phone','operator',
                'product','amount','sup_date','our_date','reason','check_instruction','verified']
 
 # ---- FIX 1: Sheets connectivity check with visible banner ----
+@st.cache_resource
 def get_gspread_client():
-    """Returns gspread client or None. Retries 3x for cold start."""
+    """Returns gspread client — cached for entire app lifetime."""
     if not GSPREAD_AVAILABLE:
         return None
     import time
@@ -317,7 +319,7 @@ def save_details_to_sheets(report_date, operator_tab, rows):
     if sh is None: return False, "Not connected"
     try:
         ws = get_or_create_sheet(sh, 'Transaction Details', DETAIL_COLS)
-        all_data = ws.get_all_records(expected_headers=DETAIL_COLS)
+        all_data = ws.get_all_records()
 
         # Split: keep verified rows for this date (protect them), drop unverified for this date
         verified_this_date = [
@@ -366,7 +368,7 @@ def load_pending_verifications():
             continue
         try:
             ws = get_or_create_sheet(sh, 'Transaction Details', DETAIL_COLS)
-            records = ws.get_all_records(expected_headers=DETAIL_COLS)
+            records = ws.get_all_records()
             all_records.extend([r for r in records if str(r.get('verified','')).startswith('⬜')])
         except Exception as e:
             errors.append(f"{op}: {str(e)[:60]}")
@@ -384,7 +386,7 @@ def load_verified():
         if sh is None: continue
         try:
             ws = get_or_create_sheet(sh, 'Transaction Details', DETAIL_COLS)
-            records = ws.get_all_records(expected_headers=DETAIL_COLS)
+            records = ws.get_all_records()
             all_records.extend([r for r in records if str(r.get('verified','')).startswith('✅') or str(r.get('verified','')).startswith('❌')])
         except: pass
     return all_records
@@ -392,7 +394,7 @@ def load_verified():
 def update_verification(sh, phone, date_val, operator_tab, new_status):
     try:
         ws = sh.worksheet('Transaction Details')
-        records = ws.get_all_records(expected_headers=DETAIL_COLS)
+        records = ws.get_all_records()
         phone_str = str(phone).strip()
         date_str  = str(date_val).strip()
         col = DETAIL_COLS.index('verified') + 1
@@ -415,7 +417,7 @@ def cross_day_match(result, report_date, operator_tab):
     if sh is None: return [], []
     try:
         ws = sh.worksheet('Transaction Details')
-        all_details = ws.get_all_records(expected_headers=DETAIL_COLS)
+        all_details = ws.get_all_records()
         df = pd.DataFrame(all_details)
         if df.empty: return [], []
         df = df[df['operator_tab'] == operator_tab]
@@ -1077,19 +1079,25 @@ def main():
         st.markdown("---")
         st.markdown("### 📊 History")
 
-        # Cached connectivity check — no live API call on every rerender
-        if get_spreadsheet("partner") is not None:
+        # Cached connectivity check — only once per session
+        if 'sheets_ok' not in st.session_state:
+            st.session_state['sheets_ok'] = get_spreadsheet('partner') is not None
+        if st.session_state['sheets_ok']:
             st.success("✅ Google Sheets connected")
         else:
             st.error("⛔ Google Sheets unavailable\nData will NOT be saved to the cloud!")
 
-        total_days = 0
-        last_date = None
-        for op in ['partner', 'pelephone', 'cellcom']:
-            h = load_history(operator_tab=op)
-            total_days += len(h)
-            if h and (last_date is None or h[-1].get('date','') > last_date):
-                last_date = h[-1].get('date','')
+        # Cache history stats — only load once per session
+        if 'sidebar_stats' not in st.session_state:
+            total_days = 0
+            last_date = None
+            for op in ['partner', 'pelephone', 'cellcom']:
+                h = load_history(operator_tab=op)
+                total_days += len(h)
+                if h and (last_date is None or h[-1].get('date','') > last_date):
+                    last_date = h[-1].get('date','')
+            st.session_state['sidebar_stats'] = (total_days, last_date)
+        total_days, last_date = st.session_state['sidebar_stats']
         if total_days > 0:
             st.success(f"✅ {total_days} days recorded")
             if last_date:
@@ -1714,82 +1722,92 @@ def main():
     # ============================================================
     elif page == "⏳ Pending Verification":
         render_header("Pending Verification", "Phones awaiting manual check", [LOGO_PAYX])
-        pending = load_pending_verifications()
 
-        if not pending:
+        col_f, col_r = st.columns([4, 1])
+        with col_r:
+            if st.button("🔄 Refresh", use_container_width=True, key="refresh_btn"):
+                st.session_state.pop('pending_local', None)
+                st.rerun()
+        with col_f:
+            saved_filter = st.session_state.get('pending_op_filter_saved', 'All')
+            op_filter = st.selectbox(
+                "Filter by operator:",
+                ["All", "partner", "pelephone", "cellcom"],
+                index=["All", "partner", "pelephone", "cellcom"].index(saved_filter)
+                    if saved_filter in ["All", "partner", "pelephone", "cellcom"] else 0,
+                key="pending_op_filter"
+            )
+            st.session_state['pending_op_filter_saved'] = op_filter
+
+        phone_search = st.text_input("🔍 Search by phone number:", key="pend_phone_search", placeholder="e.g. 0541234567")
+
+        # Load once per page visit, search/filter locally
+        if 'pending_local' not in st.session_state:
+            with st.spinner("Loading pending verifications..."):
+                loaded = load_pending_verifications()
+                if loaded:
+                    st.session_state['pending_local'] = loaded
+                    st.session_state['pending_load_ok'] = True
+                else:
+                    sh_test = get_spreadsheet()
+                    if sh_test is None:
+                        st.session_state['pending_load_ok'] = False
+                    else:
+                        st.session_state['pending_load_ok'] = True
+                    st.session_state['pending_local'] = loaded
+
+        all_pending = st.session_state.get('pending_local', [])
+        load_ok = st.session_state.get('pending_load_ok', True)
+
+        if not load_ok and not all_pending:
+            st.error("❌ Google Sheets unavailable. Click 🔄 Refresh to retry.")
+            return
+
+        if not all_pending:
             st.success("✅ Nothing pending — all verified!")
             return
 
-        # Operator filter — persisted in session_state so it survives st.rerun()
-        operators_in_pending = sorted(set(r.get('operator_tab','') for r in pending))
-        if 'pend_op_filter_val' not in st.session_state:
-            st.session_state['pend_op_filter_val'] = 'All'
-
-        op_filter = st.selectbox(
-            "Filter by operator:",
-            ["All"] + operators_in_pending,
-            index=(["All"] + operators_in_pending).index(st.session_state['pend_op_filter_val'])
-                if st.session_state['pend_op_filter_val'] in ["All"] + operators_in_pending else 0,
-            key="pend_op_filter"
-        )
-        st.session_state['pend_op_filter_val'] = op_filter
-        phone_search = st.text_input("🔍 Search by phone number:", key="pend_phone_search", placeholder="e.g. 0541234567")
-
-        pending_filtered = pending if op_filter == "All" else [r for r in pending if r.get('operator_tab','') == op_filter]
-
-        # Apply phone search filter
-        if phone_search.strip():
+        pending = all_pending
+        if op_filter != "All":
+            pending = [r for r in pending if r.get('operator_tab', '') == op_filter]
+        if phone_search:
             search_norm = phone_search.strip().lstrip('0')
-            pending_filtered = [r for r in pending_filtered
-                               if search_norm in str(r.get('phone','')).replace('.0','').lstrip('0')]
+            pending = [r for r in pending if search_norm in str(r.get('phone', '')).replace('.0', '').lstrip('0')]
 
-        total = len(pending)
-        shown = len(pending_filtered)
-        st.warning(f"⏳ {shown} phone(s) shown — {total} total pending across all operators")
+        st.warning(f"⏳ {len(pending)} phone(s) shown — {len(all_pending)} total pending across all operators")
 
-        for i, row in enumerate(pending_filtered):
-            sh = get_spreadsheet(row.get("operator_tab", "partner"))
-            raw_phone = str(row.get('phone','')).strip().replace('.0','')
-            if raw_phone and not raw_phone.startswith('0') and len(raw_phone) >= 9:
-                display_ph = '0' + raw_phone
-            else:
-                display_ph = raw_phone
-            with st.expander(f"📱 {display_ph} | {row.get('date','')} | {row.get('operator_tab','').upper()} | {row.get('category','')}"):
-                c1,c2 = st.columns(2)
-                c1.write(f"**Product:** {row.get('product','')}")
-                c1.write(f"**Amount:** {row.get('amount','')} NIS")
-                c1.write(f"**Date:** {row.get('our_date','') or row.get('sup_date','')}")
+        if not pending:
+            st.info("No results for current filter.")
+            return
+
+        sh = get_spreadsheet()
+        for i, row in enumerate(pending):
+            raw_phone = str(row.get('phone', '')).replace('.0', '')
+            with st.expander(f"📱 {display_phone(raw_phone)} | {row.get('date', '')} | {row.get('operator_tab', '').upper()} | {row.get('category', '')}"):
+                c1, c2 = st.columns(2)
+                c1.write(f"**Product:** {row.get('product', '')}")
+                c1.write(f"**Amount:** {row.get('amount', '')} NIS")
+                c1.write(f"**Date:** {row.get('our_date', '') or row.get('sup_date', '')}")
                 c2.write("**What to check:**")
-                c2.info(row.get('check_instruction',''))
-
-                # Status options — extra option for Pelephone
-                status_options = [
-                    "⬜ Not checked",
-                    "✅ Found — OK (date shift confirmed)",
-                    "✅ Found in our reports",
-                    "❌ Not found — investigate",
-                ]
-                if row.get('operator_tab','') == 'pelephone':
-                    status_options.append("↩️ Duplicate — refund issued")
-
+                c2.info(row.get('check_instruction', ''))
                 new_status = st.selectbox(
                     "Update status:",
-                    status_options,
+                    ["⬜ Not checked", "✅ Found — OK (date shift confirmed)",
+                     "✅ Found in our reports", "❌ Not found — investigate"],
                     key=f"pend_{i}"
                 )
                 if st.button("Save", key=f"pend_save_{i}"):
                     if sh:
                         ok, msg = update_verification(
-                            sh, raw_phone, row.get('date',''),
-                            row.get('operator_tab',''), new_status)
+                            sh, raw_phone, row.get('date', ''),
+                            row.get('operator_tab', ''), new_status)
                         if ok:
-                            st.success(f"✅ {msg}")
-                            st.cache_data.clear()
-                            st.rerun()
+                            st.success(f"✅ Saved: {new_status}")
                         else:
                             st.error(f"❌ {msg}")
                     else:
-                        st.error("❌ Google Sheets not connected")
+                        st.error("❌ Google Sheets not connected. Click 🔄 Refresh.")
+
 
     # ============================================================
     # PAGE: VERIFIED
