@@ -395,16 +395,19 @@ def update_verification(sh, phone, date_val, operator_tab, new_status):
     try:
         ws = sh.worksheet('Transaction Details')
         records = ws.get_all_records()
-        phone_str = str(phone).strip()
+        phone_str = str(phone).strip().replace('.0','')
+        phone_norm = phone_str.lstrip('0')
         date_str  = str(date_val).strip()
         col = DETAIL_COLS.index('verified') + 1
         for i, r in enumerate(records):
-            r_phone = str(r.get('phone', '')).strip()
+            r_phone = str(r.get('phone', '')).strip().replace('.0','')
+            r_phone_norm = r_phone.lstrip('0')
             r_date  = str(r.get('date', '')).strip()
             r_op    = str(r.get('operator_tab', '')).strip()
             phone_match = (r_phone == phone_str or
-                          r_phone == phone_str.lstrip('0') or
-                          '0' + r_phone == phone_str)
+                          r_phone_norm == phone_norm or
+                          r_phone == phone_norm or
+                          phone_norm == r_phone_norm)
             if phone_match and r_date == date_str and r_op == operator_tab:
                 ws.update_cell(i + 2, col, new_status)
                 return True, f"Updated {phone_str}"
@@ -1922,6 +1925,7 @@ def create_excel_report(result, report_date, tab_name):
         for ci, col in enumerate(df.columns, 1):
             H(ws.cell(row=2, column=ci, value=col), hdr_bg)
         ws.row_dimensions[2].height = 30
+        print("zx")
         for ri, (_, row) in enumerate(df.iterrows()):
             r = ri + 3
             bg = alt_bg if ri%2==0 else WHITE
