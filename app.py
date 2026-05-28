@@ -1786,9 +1786,10 @@ def main():
             st.info("No results for current filter.")
             return
 
-        sh = get_spreadsheet()
         for i, row in enumerate(pending):
             raw_phone = str(row.get('phone', '')).replace('.0', '')
+            row_op = row.get('operator_tab', 'partner')
+            sh = get_spreadsheet(row_op)
             with st.expander(f"📱 {display_phone(raw_phone)} | {row.get('date', '')} | {row.get('operator_tab', '').upper()} | {row.get('category', '')}"):
                 c1, c2 = st.columns(2)
                 c1.write(f"**Product:** {row.get('product', '')}")
