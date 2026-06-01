@@ -1157,7 +1157,7 @@ def main():
                     auto_date = date.today().strftime('%Y-%m-%d')
                     if 'Sup_Date' in sup_df.columns and len(sup_df) > 0:
                         try:
-                            auto_date = pd.to_datetime(sup_df['Sup_Date'].iloc[0], dayfirst=True).strftime('%Y-%m-%d')
+                            auto_date = pd.to_datetime(sup_df['Sup_Date'], dayfirst=True, errors='coerce').dropna().max().strftime('%Y-%m-%d')
                             st.info(f"📅 Date detected: **{auto_date}**")
                         except: pass
 
