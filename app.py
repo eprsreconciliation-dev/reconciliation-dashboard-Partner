@@ -1838,9 +1838,15 @@ def main():
             st.info("No verified transactions yet.")
             return
         df = pd.DataFrame(verified)
+        operators = ['All'] + sorted(df['operator_tab'].dropna().unique().tolist())
+        col_f1, col_f2 = st.columns([1, 3])
+        with col_f1:
+            op_filter = st.selectbox("Filter by operator:", operators, key="verified_op_filter")
+        if op_filter != 'All':
+            df = df[df['operator_tab'] == op_filter]
         show_cols = [c for c in ['date','operator_tab','category','phone','product','amount','verified','check_instruction'] if c in df.columns]
         st.dataframe(df[show_cols], use_container_width=True, hide_index=True)
-        st.success(f"✅ {len(verified)} transactions verified")
+        st.success(f"✅ {len(df)} transactions verified")
 
     # ============================================================
     # PAGE: INSTRUCTIONS
