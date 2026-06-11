@@ -392,24 +392,26 @@ def load_verified():
     return all_records
 
 def update_verification(sh, phone, date_val, operator_tab, new_status):
+    import time
     try:
         ws = sh.worksheet('Transaction Details')
-        records = ws.get_all_records()
         phone_str = str(phone).strip().replace('.0','')
         phone_norm = phone_str.lstrip('0')
         date_str  = str(date_val).strip()
         col = DETAIL_COLS.index('verified') + 1
-        for i, r in enumerate(records):
-            r_phone = str(r.get('phone', '')).strip().replace('.0','')
-            r_phone_norm = r_phone.lstrip('0')
-            r_date  = str(r.get('date', '')).strip()
-            r_op    = str(r.get('operator_tab', '')).strip()
-            phone_match = (r_phone == phone_str or
-                          r_phone_norm == phone_norm or
-                          r_phone == phone_norm or
-                          phone_norm == r_phone_norm)
-            if phone_match and r_date == date_str and r_op == operator_tab:
-                ws.update_cell(i + 2, col, new_status)
+        # Use find() to locate phone cell — much lighter than get_all_records()
+        try:
+            cells = ws.findall(phone_str)
+            if not cells:
+                cells = ws.findall(phone_norm)
+        except Exception:
+            cells = []
+        for cell in cells:
+            row_vals = ws.row_values(cell.row)
+            r_date = str(row_vals[DETAIL_COLS.index('date')]).strip() if len(row_vals) > DETAIL_COLS.index('date') else ''
+            r_op   = str(row_vals[DETAIL_COLS.index('operator_tab')]).strip() if len(row_vals) > DETAIL_COLS.index('operator_tab') else ''
+            if r_date == date_str and r_op == operator_tab:
+                ws.update_cell(cell.row, col, new_status)
                 return True, f"Updated {phone_str}"
         return False, f"Phone {phone_str} not found for {date_str} / {operator_tab}"
     except Exception as e:
@@ -1812,6 +1814,7 @@ def main():
                         ok, msg = update_verification(
                             sh, raw_phone, row.get('date', ''),
                             row.get('operator_tab', ''), new_status)
+                        st.write(f"DEBUG: ok={ok}, msg={msg}")
                         if ok:
                             st.success(f"✅ Saved: {new_status}")
                             if 'pending_local' in st.session_state:
