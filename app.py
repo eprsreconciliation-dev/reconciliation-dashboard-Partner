@@ -1157,7 +1157,7 @@ def main():
                     auto_date = date.today().strftime('%Y-%m-%d')
                     if 'Sup_Date' in sup_df.columns and len(sup_df) > 0:
                         try:
-                            auto_date = pd.to_datetime(sup_df['Sup_Date'], dayfirst=True, errors='coerce').dropna().max().strftime('%Y-%m-%d')
+                            auto_date = pd.to_datetime(sup_df['Sup_Date'].iloc[0], dayfirst=True).strftime('%Y-%m-%d')
                             st.info(f"📅 Date detected: **{auto_date}**")
                         except: pass
 
@@ -1786,13 +1786,10 @@ def main():
             st.info("No results for current filter.")
             return
 
-        sh_cache = {}
         for i, row in enumerate(pending):
             raw_phone = str(row.get('phone', '')).replace('.0', '')
             row_op = row.get('operator_tab', 'partner')
-            if row_op not in sh_cache:
-                sh_cache[row_op] = get_spreadsheet(row_op)
-            sh = sh_cache[row_op]
+            sh = get_spreadsheet(row_op)
             with st.expander(f"📱 {display_phone(raw_phone)} | {row.get('date', '')} | {row.get('operator_tab', '').upper()} | {row.get('category', '')}"):
                 c1, c2 = st.columns(2)
                 c1.write(f"**Product:** {row.get('product', '')}")
@@ -1814,14 +1811,6 @@ def main():
                             row.get('operator_tab', ''), new_status)
                         if ok:
                             st.success(f"✅ Saved: {new_status}")
-                            if 'pending_local' in st.session_state:
-                                st.session_state['pending_local'] = [
-                                    r for r in st.session_state['pending_local']
-                                    if not (str(r.get('phone','')).replace('.0','') == raw_phone
-                                            and r.get('date','') == row.get('date','')
-                                            and r.get('operator_tab','') == row.get('operator_tab',''))
-                                ]
-                            st.rerun()
                         else:
                             st.error(f"❌ {msg}")
                     else:
@@ -1838,15 +1827,9 @@ def main():
             st.info("No verified transactions yet.")
             return
         df = pd.DataFrame(verified)
-        operators = ['All'] + sorted(df['operator_tab'].dropna().unique().tolist())
-        col_f1, col_f2 = st.columns([1, 3])
-        with col_f1:
-            op_filter = st.selectbox("Filter by operator:", operators, key="verified_op_filter")
-        if op_filter != 'All':
-            df = df[df['operator_tab'] == op_filter]
         show_cols = [c for c in ['date','operator_tab','category','phone','product','amount','verified','check_instruction'] if c in df.columns]
         st.dataframe(df[show_cols], use_container_width=True, hide_index=True)
-        st.success(f"✅ {len(df)} transactions verified")
+        st.success(f"✅ {len(verified)} transactions verified")
 
     # ============================================================
     # PAGE: INSTRUCTIONS
