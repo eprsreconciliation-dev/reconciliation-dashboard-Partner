@@ -418,7 +418,9 @@ def batch_save_verifications(updates):
                 for i, r in enumerate(records):
                     r_phone = str(r.get('phone','')).strip().replace('.0','')
                     r_phone_norm = r_phone.lstrip('0')
-                    phone_match = (r_phone == phone_str or r_phone_norm == phone_norm)
+                    phone_match = (r_phone == phone_str or r_phone_norm == phone_norm
+                                   or r_phone == phone_norm or phone_norm == r_phone_norm
+                                   or r_phone.lstrip('0') == phone_str.lstrip('0'))
                     if phone_match and str(r.get('date','')).strip() == date_str and str(r.get('operator_tab','')).strip() == operator_tab:
                         cell_updates.append({'range': f'{chr(64+col)}{i+2}', 'values': [[u['new_status']]]})
                         break
@@ -1840,7 +1842,7 @@ def main():
                             row.get('operator_tab', ''), new_status)
                         st.write(f"DEBUG: ok={ok}, msg={msg}")
                         if ok:
-                            st.success(f"✅ Saved: {new_status}")
+                            st.success(f"✅ Saved: {new_status} | {msg}")
                             if 'pending_local' in st.session_state:
                                 st.session_state['pending_local'] = [
                                     r for r in st.session_state['pending_local']
