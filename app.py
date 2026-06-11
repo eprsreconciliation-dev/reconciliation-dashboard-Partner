@@ -391,57 +391,29 @@ def load_verified():
         except: pass
     return all_records
 
-def batch_save_verifications(updates):
-    """
-    updates = list of dicts: {phone, date, operator_tab, new_status}
-    Loads sheet ONCE per operator, updates all rows, saves in one batch.
-    """
-    from collections import defaultdict
-    by_op = defaultdict(list)
-    for u in updates:
-        by_op[u['operator_tab']].append(u)
-    results = []
-    for operator_tab, op_updates in by_op.items():
-        sh = get_spreadsheet(operator_tab)
-        if sh is None:
-            results.append((False, f"{operator_tab}: not connected"))
-            continue
-        try:
-            ws = sh.worksheet('Transaction Details')
-            records = ws.get_all_records()  # ONE read per operator
-            col = DETAIL_COLS.index('verified') + 1
-            cell_updates = []
-            for u in op_updates:
-                phone_str = str(u['phone']).strip().replace('.0','')
-                phone_norm = phone_str.lstrip('0')
-                date_str = str(u['date']).strip()
-                for i, r in enumerate(records):
-                    r_phone = str(r.get('phone','')).strip().replace('.0','')
-                    r_phone_norm = r_phone.lstrip('0')
-                    phone_match = (r_phone == phone_str or r_phone_norm == phone_norm
-                                   or r_phone == phone_norm or phone_norm == r_phone_norm
-                                   or r_phone.lstrip('0') == phone_str.lstrip('0'))
-                    if phone_match and str(r.get('date','')).strip() == date_str and str(r.get('operator_tab','')).strip() == operator_tab:
-                        cell_updates.append({'range': f'{chr(64+col)}{i+2}', 'values': [[u['new_status']]]})
-                        break
-            if cell_updates:
-                ws.batch_update(cell_updates)  # ONE write per operator
-                results.append((True, f"Updated {len(cell_updates)} records for {operator_tab}"))
-            else:
-                results.append((False, f"No matching records found for {operator_tab}"))
-        except Exception as e:
-            results.append((False, f"Sheets error {operator_tab}: {e}"))
-    return results
-
 def update_verification(sh, phone, date_val, operator_tab, new_status):
-    """Single update — used for backward compat, calls batch internally."""
-    results = batch_save_verifications([{
-        'phone': phone, 'date': date_val,
-        'operator_tab': operator_tab, 'new_status': new_status
-    }])
-    if results and results[0][0]:
-        return True, results[0][1]
-    return False, results[0][1] if results else "Unknown error"
+    try:
+        ws = sh.worksheet('Transaction Details')
+        records = ws.get_all_records()
+        phone_str = str(phone).strip().replace('.0','')
+        phone_norm = phone_str.lstrip('0')
+        date_str  = str(date_val).strip()
+        col = DETAIL_COLS.index('verified') + 1
+        for i, r in enumerate(records):
+            r_phone = str(r.get('phone', '')).strip().replace('.0','')
+            r_phone_norm = r_phone.lstrip('0')
+            r_date  = str(r.get('date', '')).strip()
+            r_op    = str(r.get('operator_tab', '')).strip()
+            phone_match = (r_phone == phone_str or
+                          r_phone_norm == phone_norm or
+                          r_phone == phone_norm or
+                          phone_norm == r_phone_norm)
+            if phone_match and r_date == date_str and r_op == operator_tab:
+                ws.update_cell(i + 2, col, new_status)
+                return True, f"Updated {phone_str}"
+        return False, f"Phone {phone_str} not found for {date_str} / {operator_tab}"
+    except Exception as e:
+        return False, f"Sheets error: {e}"
 
 def cross_day_match(result, report_date, operator_tab):
     sh = get_spreadsheet(operator_tab)
@@ -1840,9 +1812,8 @@ def main():
                         ok, msg = update_verification(
                             sh, raw_phone, row.get('date', ''),
                             row.get('operator_tab', ''), new_status)
-                        st.write(f"DEBUG: ok={ok}, msg={msg}")
                         if ok:
-                            st.success(f"✅ Saved: {new_status} | {msg}")
+                            st.success(f"✅ Saved: {new_status}")
                             if 'pending_local' in st.session_state:
                                 st.session_state['pending_local'] = [
                                     r for r in st.session_state['pending_local']
