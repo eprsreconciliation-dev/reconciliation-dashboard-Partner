@@ -1794,6 +1794,7 @@ def main():
             if row_op not in st.session_state['sh_cache']:
                 st.session_state['sh_cache'][row_op] = get_spreadsheet(row_op)
             sh = st.session_state['sh_cache'][row_op]
+            print(f"DEBUG sh_cache: op={row_op}, sh={sh}")
             with st.expander(f"📱 {display_phone(raw_phone)} | {row.get('date', '')} | {row.get('operator_tab', '').upper()} | {row.get('category', '')}"):
                 c1, c2 = st.columns(2)
                 c1.write(f"**Product:** {row.get('product', '')}")
@@ -1801,14 +1802,15 @@ def main():
                 c1.write(f"**Date:** {row.get('our_date', '') or row.get('sup_date', '')}")
                 c2.write("**What to check:**")
                 c2.info(row.get('check_instruction', ''))
+                _ukey = f"{raw_phone}_{row.get('date','')}_{row.get('operator_tab','')}"
                 new_status = st.selectbox(
                     "Update status:",
                     ["⬜ Not checked", "✅ Found — OK (date shift confirmed)",
                      "✅ Found in our reports", "❌ Not found — investigate",
                      "🔵 Duplicate — refund issued to client"],
-                    key=f"pend_{i}"
+                    key=f"pend_{_ukey}"
                 )
-                if st.button("Save", key=f"pend_save_{i}"):
+                if st.button("Save", key=f"pend_save_{_ukey}"):
                     if sh:
                         ok, msg = update_verification(
                             sh, raw_phone, row.get('date', ''),
