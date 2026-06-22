@@ -1817,6 +1817,14 @@ def main():
                             row.get('operator_tab', ''), new_status)
                         if ok:
                             st.success(f"✅ Saved: {new_status}")
+                            if 'pending_local' in st.session_state:
+                                st.session_state['pending_local'] = [
+                                    r for r in st.session_state['pending_local']
+                                    if not (str(r.get('phone','')).replace('.0','') == raw_phone
+                                            and r.get('date','') == row.get('date','')
+                                            and r.get('operator_tab','') == row.get('operator_tab',''))
+                                ]
+                            st.rerun()
                         else:
                             st.error(f"❌ {msg}")
                     else:
