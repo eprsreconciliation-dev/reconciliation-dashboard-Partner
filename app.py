@@ -1802,7 +1802,7 @@ def main():
                 c1.write(f"**Date:** {row.get('our_date', '') or row.get('sup_date', '')}")
                 c2.write("**What to check:**")
                 c2.info(row.get('check_instruction', ''))
-                _ukey = f"{raw_phone}_{row.get('date','')}_{row.get('operator_tab','')}"
+                _ukey = f"{i}_{raw_phone}_{row.get('date','')}_{row.get('operator_tab','')}"
                 new_status = st.selectbox(
                     "Update status:",
                     ["⬜ Not checked", "✅ Found — OK (date shift confirmed)",
