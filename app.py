@@ -97,7 +97,7 @@ st.markdown("""
 # ============================================================
 # CELLCOM PRICE MAP
 # ============================================================
-APP_VERSION = "v2026-07-14-row-save"
+APP_VERSION = "v2026-07-14-date-shift-pairs"
 
 CELLCOM_FIXED = {15.0, 19.0, 25.0, 29.0, 39.9, 49.0}
 CELLCOM_DISCOUNT = 5.0
@@ -446,6 +446,53 @@ def update_verification_by_row(sh, sheet_row, phone, new_status):
         return True, f"Updated {phone} (row {sheet_row})"
     except Exception as e:
         return False, f"Sheets error: {e}"
+
+def find_date_shift_pairs(records, max_shift_days=4):
+    """Partner only: pair 'Our Only' (date D) with 'Supplier Only' (D+1..D+max_shift_days)
+    for the same normalized phone and identical amount. One-to-one matching,
+    earliest supplier date wins. Returns list of (our_rec, sup_rec, shift_days)."""
+    from datetime import datetime as _dt
+
+    def _pdate(s):
+        try:
+            return _dt.strptime(str(s).strip()[:10], '%Y-%m-%d')
+        except Exception:
+            return None
+
+    def _amt(v):
+        try:
+            return round(float(str(v).replace(',', '')), 2)
+        except Exception:
+            return None
+
+    ours, sups = [], []
+    for r in records:
+        if r.get('_op', r.get('operator_tab')) != 'partner':
+            continue
+        cat = str(r.get('category', '')).strip()
+        d = _pdate(r.get('date'))
+        a = _amt(r.get('amount'))
+        if d is None or a is None:
+            continue
+        key = (_norm_cmp(r.get('phone')), a)
+        if cat == 'Our Only':
+            ours.append((key, d, r))
+        elif cat == 'Supplier Only':
+            sups.append((key, d, r))
+
+    sups.sort(key=lambda x: x[1])
+    used = set()
+    pairs = []
+    for key_o, d_o, r_o in sorted(ours, key=lambda x: x[1]):
+        for j, (key_s, d_s, r_s) in enumerate(sups):
+            if j in used or key_s != key_o:
+                continue
+            delta = (d_s - d_o).days
+            if 1 <= delta <= max_shift_days:
+                used.add(j)
+                pairs.append((r_o, r_s, delta))
+                break
+    return pairs
 
 def cross_day_match(result, report_date, operator_tab):
     sh = get_spreadsheet(operator_tab)
@@ -1845,6 +1892,58 @@ def main():
         if not pending:
             st.info("No results for current filter.")
             return
+
+        # ---- Date-shift pairs (Partner): Our Only D -> Supplier Only D+1..D+4 ----
+        _pairs = find_date_shift_pairs(all_pending)
+        if _pairs:
+            st.markdown(f"#### 🔗 Date-shift pairs (Partner) — {len(_pairs)} pair(s) detected")
+            _pair_rows = [{
+                'Phone': display_phone(str(_ro.get('phone', '')).replace('.0', '')),
+                'Amount': _ro.get('amount', ''),
+                'Our Only date': _ro.get('date', ''),
+                'Supplier Only date': _rs.get('date', ''),
+                'Shift (days)': _dl,
+            } for _ro, _rs, _dl in _pairs]
+            st.dataframe(pd.DataFrame(_pair_rows), use_container_width=True, hide_index=True)
+            st.caption("Rule: same phone + same amount, Our Only (D) → Supplier Only (D+1..D+4). "
+                       "Will set: Our Only → '✅ Found — OK (date shift confirmed)', "
+                       "Supplier Only → '✅ Found in our reports'.")
+            if st.button(f"🔗 Verify all {len(_pairs)} pair(s) — one batch",
+                         type="primary", key="pend_pairs_save"):
+                sh_p = get_spreadsheet('partner')
+                if sh_p is None:
+                    st.error("❌ Google Sheets not connected. Click 🔄 Refresh.")
+                else:
+                    try:
+                        ws_p = sh_p.worksheet('Transaction Details')
+                        col_phones = _api_retry(lambda: ws_p.col_values(PHONE_COL))
+                        cells, skipped = [], []
+                        for _ro, _rs, _dl in _pairs:
+                            for _rec, _status in (
+                                    (_ro, "✅ Found — OK (date shift confirmed)"),
+                                    (_rs, "✅ Found in our reports")):
+                                _rn = _rec.get('_row')
+                                _actual = col_phones[_rn - 1] if _rn and _rn - 1 < len(col_phones) else ''
+                                if _rn and _norm_cmp(_actual) == _norm_cmp(_rec.get('phone')):
+                                    cells.append(gspread.Cell(
+                                        row=_rn, col=VERIFIED_COL, value=_status))
+                                else:
+                                    skipped.append(display_phone(str(_rec.get('phone', ''))))
+                        if cells:
+                            _api_retry(lambda: ws_p.update_cells(cells, value_input_option='RAW'))
+                        _saved = {('partner', c.row) for c in cells}
+                        st.session_state['pending_local'] = [
+                            x for x in st.session_state.get('pending_local', [])
+                            if (x.get('_op'), x.get('_row')) not in _saved]
+                        _msg = f"✅ partner: verified {len(cells)} record(s) in {len(_pairs)} pair(s)"
+                        if skipped:
+                            _msg += (f" | skipped {len(skipped)} (rows moved — "
+                                     f"click Refresh): {', '.join(skipped)}")
+                        st.session_state['pend_last_result'] = [_msg]
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"❌ {e}")
+            st.markdown("---")
 
         STATUS_OPTIONS = ["⬜ Not checked", "✅ Found — OK (date shift confirmed)",
                           "✅ Found in our reports", "❌ Not found — investigate",
