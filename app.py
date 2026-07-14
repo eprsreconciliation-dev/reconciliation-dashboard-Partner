@@ -97,6 +97,8 @@ st.markdown("""
 # ============================================================
 # CELLCOM PRICE MAP
 # ============================================================
+APP_VERSION = "v2026-07-14-row-save"
+
 CELLCOM_FIXED = {15.0, 19.0, 25.0, 29.0, 39.9, 49.0}
 CELLCOM_DISCOUNT = 5.0
 
@@ -226,19 +228,25 @@ def save_confirmation_ui(report_date, operator_tab, session_key):
 
     return True
 
-def get_spreadsheet(operator='partner'):
+@st.cache_resource(ttl=1800, show_spinner=False)
+def _open_spreadsheet(operator):
+    """Open spreadsheet once per operator, cached 30 min.
+    Raises on failure so that failures are NOT cached."""
     gc = get_gspread_client()
-    if gc is None: return None
+    if gc is None:
+        raise RuntimeError("gspread client unavailable")
+    if operator == 'pelephone':
+        sid = st.secrets["google_sheets_pelephone"]["spreadsheet_id"]
+    elif operator == 'cellcom':
+        sid = st.secrets["google_sheets_cellcom"]["spreadsheet_id"]
+    else:
+        sid = st.secrets["google_sheets"]["spreadsheet_id"]
+    return gc.open_by_key(sid)
+
+def get_spreadsheet(operator='partner'):
     try:
-        if operator == 'pelephone':
-            sid = st.secrets["google_sheets_pelephone"]["spreadsheet_id"]
-        elif operator == 'cellcom':
-            sid = st.secrets["google_sheets_cellcom"]["spreadsheet_id"]
-        else:
-            sid = st.secrets["google_sheets"]["spreadsheet_id"]
-        sh = gc.open_by_key(sid)
-        return sh
-    except Exception as e:
+        return _open_spreadsheet(operator)
+    except Exception:
         return None
 
 def get_or_create_sheet(sh, title, headers):
@@ -359,6 +367,8 @@ def save_details_to_sheets(report_date, operator_tab, rows):
         return False, f"Details error: {e}"
 
 def load_pending_verifications():
+    """One read per operator; every pending record carries its real sheet
+    row number (_row) and source spreadsheet (_op) for direct writes."""
     all_records = []
     errors = []
     for op in ['partner', 'pelephone', 'cellcom']:
@@ -368,12 +378,19 @@ def load_pending_verifications():
             continue
         try:
             ws = get_or_create_sheet(sh, 'Transaction Details', DETAIL_COLS)
-            records = ws.get_all_records()
-            all_records.extend([r for r in records if str(r.get('verified','')).startswith('⬜')])
+            values = _api_retry(lambda: ws.get_all_values())
+            if not values:
+                continue
+            headers = values[0]
+            for idx, rowvals in enumerate(values[1:], start=2):
+                r = dict(zip(headers, rowvals))
+                if str(r.get('verified', '')).startswith('⬜'):
+                    r['_row'] = idx   # real row number in the sheet
+                    r['_op'] = op     # which spreadsheet it lives in
+                    all_records.append(r)
         except Exception as e:
             errors.append(f"{op}: {str(e)[:60]}")
     if errors:
-        # Store errors in session state to display in UI
         st.session_state['pending_load_errors'] = errors
     else:
         st.session_state.pop('pending_load_errors', None)
@@ -391,27 +408,42 @@ def load_verified():
         except: pass
     return all_records
 
-def update_verification(sh, phone, date_val, operator_tab, new_status):
+def _api_retry(fn, attempts=3):
+    """Run a Sheets API call with backoff retry on quota/server errors (429/5xx)."""
+    import time
+    last_err = None
+    for a in range(attempts):
+        try:
+            return fn()
+        except gspread.exceptions.APIError as e:
+            last_err = e
+            code = getattr(getattr(e, 'response', None), 'status_code', None)
+            if code in (429, 500, 502, 503) and a < attempts - 1:
+                time.sleep(2 ** (a + 1))  # 2s, 4s
+                continue
+            raise
+    raise last_err
+
+VERIFIED_COL = DETAIL_COLS.index('verified') + 1
+PHONE_COL = DETAIL_COLS.index('phone') + 1
+
+def _norm_cmp(p):
+    return str(p or '').strip().replace('.0', '').lstrip('0')
+
+def update_verification_by_row(sh, sheet_row, phone, new_status):
+    """Direct row write: 1 cheap read (integrity check of one cell) + 1 write.
+    No full-sheet read -> no 429 cascade. If the row shifted (daily save
+    rebuilt the sheet), refuse to write and ask for a Refresh."""
     try:
+        if not sheet_row:
+            return False, "No row reference — click 🔄 Refresh to reload."
         ws = sh.worksheet('Transaction Details')
-        records = ws.get_all_records()
-        phone_str = str(phone).strip().replace('.0','')
-        phone_norm = phone_str.lstrip('0')
-        date_str  = str(date_val).strip()
-        col = DETAIL_COLS.index('verified') + 1
-        for i, r in enumerate(records):
-            r_phone = str(r.get('phone', '')).strip().replace('.0','')
-            r_phone_norm = r_phone.lstrip('0')
-            r_date  = str(r.get('date', '')).strip()
-            r_op    = str(r.get('operator_tab', '')).strip()
-            phone_match = (r_phone == phone_str or
-                          r_phone_norm == phone_norm or
-                          r_phone == phone_norm or
-                          phone_norm == r_phone_norm)
-            if phone_match and r_date == date_str and r_op == operator_tab:
-                ws.update_cell(i + 2, col, new_status)
-                return True, f"Updated {phone_str}"
-        return False, f"Phone {phone_str} not found for {date_str} / {operator_tab}"
+        current_phone = _api_retry(lambda: ws.cell(sheet_row, PHONE_COL).value)
+        if _norm_cmp(current_phone) != _norm_cmp(phone):
+            return False, (f"Row {sheet_row} changed (holds '{current_phone}', "
+                           f"expected '{phone}'). Click 🔄 Refresh and retry.")
+        _api_retry(lambda: ws.update_cell(sheet_row, VERIFIED_COL, new_status))
+        return True, f"Updated {phone} (row {sheet_row})"
     except Exception as e:
         return False, f"Sheets error: {e}"
 
@@ -1111,6 +1143,17 @@ def main():
         else:
             st.info("No history yet")
 
+        st.markdown("---")
+        _build = None
+        try:
+            import subprocess as _sp
+            _out = _sp.getoutput('git rev-parse --short HEAD 2>/dev/null').strip()
+            if _out and ' ' not in _out and len(_out) <= 12:
+                _build = _out
+        except Exception:
+            pass
+        st.caption(f"Build: {_build or 'n/a'} | {APP_VERSION}")
+
     # ============================================================
     # PAGE: PARTNER + 012TALK
     # ============================================================
@@ -1747,6 +1790,23 @@ def main():
 
         phone_search = st.text_input("🔍 Search by phone number:", key="pend_phone_search", placeholder="e.g. 0541234567")
 
+        # Show result of the previous save (survives st.rerun)
+        if 'pend_last_result' in st.session_state:
+            for _m in st.session_state.pop('pend_last_result'):
+                if _m.startswith('✅'):
+                    st.success(_m)
+                else:
+                    st.error(_m)
+
+        # Surface per-operator load problems instead of hiding them
+        for _e in st.session_state.get('pending_load_errors', []):
+            st.warning(f"⚠️ Load issue — {_e}")
+
+        # Drop cache written by an older app version (rows have no _row)
+        _pl = st.session_state.get('pending_local')
+        if _pl and '_row' not in _pl[0]:
+            st.session_state.pop('pending_local', None)
+
         # Load once per page visit, search/filter locally
         if 'pending_local' not in st.session_state:
             with st.spinner("Loading pending verifications..."):
@@ -1786,47 +1846,117 @@ def main():
             st.info("No results for current filter.")
             return
 
-        sh_cache = {}
-        for i, row in enumerate(pending):
-            raw_phone = str(row.get('phone', '')).replace('.0', '')
-            row_op = row.get('operator_tab', 'partner')
-            if row_op not in sh_cache:
-                sh_cache[row_op] = get_spreadsheet(row_op)
-            sh = sh_cache[row_op]
-            with st.expander(f"📱 {display_phone(raw_phone)} | {row.get('date', '')} | {row.get('operator_tab', '').upper()} | {row.get('category', '')}"):
-                c1, c2 = st.columns(2)
-                c1.write(f"**Product:** {row.get('product', '')}")
-                c1.write(f"**Amount:** {row.get('amount', '')} NIS")
-                c1.write(f"**Date:** {row.get('our_date', '') or row.get('sup_date', '')}")
-                c2.write("**What to check:**")
-                c2.info(row.get('check_instruction', ''))
-                _ukey = f"{i}_{raw_phone}_{row.get('date','')}_{row.get('operator_tab','')}"
-                new_status = st.selectbox(
-                    "Update status:",
-                    ["⬜ Not checked", "✅ Found — OK (date shift confirmed)",
-                     "✅ Found in our reports", "❌ Not found — investigate",
-                     "🔵 Duplicate — refund issued to client"],
-                    key=f"pend_{_ukey}"
-                )
-                if st.button("Save", key=f"pend_save_{_ukey}"):
-                    if sh:
-                        ok, msg = update_verification(
-                            sh, raw_phone, row.get('date', ''),
-                            row.get('operator_tab', ''), new_status)
-                        if ok:
-                            st.success(f"✅ Saved: {new_status}")
-                            if 'pending_local' in st.session_state:
-                                st.session_state['pending_local'] = [
-                                    r for r in st.session_state['pending_local']
-                                    if not (str(r.get('phone','')).replace('.0','') == raw_phone
-                                            and r.get('date','') == row.get('date','')
-                                            and r.get('operator_tab','') == row.get('operator_tab',''))
-                                ]
-                            st.rerun()
+        STATUS_OPTIONS = ["⬜ Not checked", "✅ Found — OK (date shift confirmed)",
+                          "✅ Found in our reports", "❌ Not found — investigate",
+                          "🔵 Duplicate — refund issued to client"]
+
+        bulk_mode = st.checkbox(
+            "⚡ Bulk mode — set statuses in a table, save in one batch per operator",
+            key="pend_bulk_mode")
+
+        if bulk_mode:
+            bulk_df = pd.DataFrame([{
+                'Save': False,
+                'Phone': display_phone(str(r.get('phone', '')).replace('.0', '')),
+                'Date': r.get('date', ''),
+                'Operator': r.get('_op', r.get('operator_tab', '')),
+                'Category': r.get('category', ''),
+                'Product': r.get('product', ''),
+                'Amount': r.get('amount', ''),
+                'New status': "⬜ Not checked",
+                '_row': r.get('_row'),
+            } for r in pending])
+            edited = st.data_editor(
+                bulk_df,
+                column_config={
+                    'Save': st.column_config.CheckboxColumn('Save'),
+                    'New status': st.column_config.SelectboxColumn(
+                        'New status', options=STATUS_OPTIONS),
+                    '_row': None,
+                },
+                disabled=['Phone', 'Date', 'Operator', 'Category', 'Product', 'Amount'],
+                use_container_width=True, hide_index=True, key="pend_bulk_editor")
+            to_save = edited[(edited['Save']) & (edited['New status'] != "⬜ Not checked")]
+            st.caption(f"Selected for save: {len(to_save)}")
+            if st.button("💾 Save selected", type="primary", key="pend_bulk_save"):
+                if len(to_save) == 0:
+                    st.warning("Tick 'Save' and choose a status for at least one row.")
+                else:
+                    results = []
+                    for op_name, grp in to_save.groupby('Operator'):
+                        sh_op = get_spreadsheet(op_name)
+                        if sh_op is None:
+                            results.append(f"❌ {op_name}: Sheets not connected")
+                            continue
+                        try:
+                            ws_op = sh_op.worksheet('Transaction Details')
+                            col_phones = _api_retry(lambda: ws_op.col_values(PHONE_COL))
+                            cells, skipped = [], []
+                            for _, r in grp.iterrows():
+                                if pd.isna(r['_row']):
+                                    skipped.append(str(r['Phone']))
+                                    continue
+                                rn = int(r['_row'])
+                                actual = col_phones[rn - 1] if rn - 1 < len(col_phones) else ''
+                                if _norm_cmp(actual) == _norm_cmp(r['Phone']):
+                                    cells.append(gspread.Cell(
+                                        row=rn, col=VERIFIED_COL, value=r['New status']))
+                                else:
+                                    skipped.append(str(r['Phone']))
+                            if cells:
+                                _api_retry(lambda: ws_op.update_cells(
+                                    cells, value_input_option='RAW'))
+                            msg = f"✅ {op_name}: saved {len(cells)}"
+                            if skipped:
+                                msg += (f" | skipped {len(skipped)} "
+                                        f"(rows moved — click Refresh): {', '.join(skipped)}")
+                            results.append(msg)
+                            saved = {(op_name, c.row) for c in cells}
+                            st.session_state['pending_local'] = [
+                                x for x in st.session_state.get('pending_local', [])
+                                if (x.get('_op'), x.get('_row')) not in saved]
+                        except Exception as e:
+                            results.append(f"❌ {op_name}: {e}")
+                    st.session_state['pend_last_result'] = results
+                    st.rerun()
+        else:
+            if len(pending) > 50:
+                st.info(f"Showing first 50 of {len(pending)} — use filter/search "
+                        f"or ⚡ Bulk mode for mass updates.")
+            for i, row in enumerate(pending[:50]):
+                raw_phone = str(row.get('phone', '')).replace('.0', '')
+                row_op = row.get('_op', row.get('operator_tab', 'partner'))
+                sheet_row = row.get('_row')
+                with st.expander(f"📱 {display_phone(raw_phone)} | {row.get('date', '')} | {str(row_op).upper()} | {row.get('category', '')}"):
+                    c1, c2 = st.columns(2)
+                    c1.write(f"**Product:** {row.get('product', '')}")
+                    c1.write(f"**Amount:** {row.get('amount', '')} NIS")
+                    c1.write(f"**Date:** {row.get('our_date', '') or row.get('sup_date', '')}")
+                    c2.write("**What to check:**")
+                    c2.info(row.get('check_instruction', ''))
+                    _ukey = f"{row_op}_{sheet_row}"
+                    new_status = st.selectbox("Update status:", STATUS_OPTIONS,
+                                              key=f"pend_{_ukey}")
+                    if st.button("Save", key=f"pend_save_{_ukey}"):
+                        if new_status == "⬜ Not checked":
+                            st.warning("Choose a status first.")
                         else:
-                            st.error(f"❌ {msg}")
-                    else:
-                        st.error("❌ Google Sheets not connected. Click 🔄 Refresh.")
+                            sh = get_spreadsheet(row_op)
+                            if sh is None:
+                                st.error("❌ Google Sheets not connected. Click 🔄 Refresh.")
+                            else:
+                                ok, msg = update_verification_by_row(
+                                    sh, sheet_row, raw_phone, new_status)
+                                if ok:
+                                    st.session_state['pending_local'] = [
+                                        r for r in st.session_state.get('pending_local', [])
+                                        if not (r.get('_op') == row_op
+                                                and r.get('_row') == sheet_row)]
+                                    st.session_state['pend_last_result'] = [
+                                        f"✅ Saved {display_phone(raw_phone)}: {new_status}"]
+                                    st.rerun()
+                                else:
+                                    st.error(f"❌ {msg}")
 
 
     # ============================================================
@@ -1938,7 +2068,6 @@ def create_excel_report(result, report_date, tab_name):
         for ci, col in enumerate(df.columns, 1):
             H(ws.cell(row=2, column=ci, value=col), hdr_bg)
         ws.row_dimensions[2].height = 30
-        print("zx")
         for ri, (_, row) in enumerate(df.iterrows()):
             r = ri + 3
             bg = alt_bg if ri%2==0 else WHITE
