@@ -97,7 +97,7 @@ st.markdown("""
 # ============================================================
 # CELLCOM PRICE MAP
 # ============================================================
-APP_VERSION = "v2026-07-14-users"
+APP_VERSION = "v2026-07-17-session"
 
 CELLCOM_FIXED = {15.0, 19.0, 25.0, 29.0, 39.9, 49.0}
 CELLCOM_DISCOUNT = 5.0
@@ -1187,6 +1187,42 @@ def load_users():
 def _is_active(u):
     return str(u.get('active', '')).strip().lower() in ('1', 'true', 'yes', 'y')
 
+SESSION_HOURS = 6
+
+def _session_key():
+    try:
+        return str(st.secrets["gcp_service_account"]["private_key"])
+    except Exception:
+        return "local-dev-fallback-key"
+
+def _make_session_token(email, src, hours=SESSION_HOURS):
+    import hmac, hashlib, base64, time
+    exp = int(time.time()) + int(hours * 3600)
+    payload = f"{email}|{src}|{exp}"
+    sig = hmac.new(_session_key().encode(), payload.encode(),
+                   hashlib.sha256).hexdigest()[:32]
+    return base64.urlsafe_b64encode(f"{payload}|{sig}".encode()).decode()
+
+def _parse_session_token(tok):
+    """Returns (email, src) if the token is authentic and not expired, else None."""
+    import hmac, hashlib, base64, time
+    try:
+        raw = base64.urlsafe_b64decode(str(tok).encode()).decode()
+        parts = raw.split('|')
+        if len(parts) != 4:
+            return None
+        email, src, exp, sig = parts
+        payload = f"{email}|{src}|{exp}"
+        good = hmac.new(_session_key().encode(), payload.encode(),
+                        hashlib.sha256).hexdigest()[:32]
+        if not hmac.compare_digest(sig, good):
+            return None
+        if int(exp) < time.time():
+            return None
+        return email.strip().lower(), src
+    except Exception:
+        return None
+
 def check_login():
     """Returns username (email) if logged in, 'setup' if auth is not
     configured yet (open access, setup mode), or None while the
@@ -1200,6 +1236,31 @@ def check_login():
 
     if not fb and not active_users:
         return "setup"   # nothing configured -> open, create first admin in UI
+
+    # Page refresh wipes session_state -> try to restore from the signed token
+    if not st.session_state.get('auth_user'):
+        _tok = st.query_params.get('s')
+        if _tok:
+            _te = _parse_session_token(_tok)
+            if _te:
+                _e, _src = _te
+                if _src == 'secrets' and fb \
+                        and _e == str(fb.get('email', '')).strip().lower():
+                    st.session_state['auth_user'] = _e
+                    st.session_state['auth_role'] = 'admin'
+                    st.session_state['auth_src'] = 'secrets'
+                else:
+                    _m0 = [u for u in active_users
+                           if str(u.get('email', '')).strip().lower() == _e]
+                    if _m0:
+                        st.session_state['auth_user'] = _e
+                        st.session_state['auth_role'] = (_m0[0].get('role') or 'user').strip().lower()
+                        st.session_state['auth_src'] = 'sheet'
+            if not st.session_state.get('auth_user'):
+                try:
+                    del st.query_params['s']   # invalid, expired or deactivated
+                except Exception:
+                    pass
 
     cur = st.session_state.get('auth_user')
     if cur:
@@ -1230,6 +1291,7 @@ def check_login():
             st.session_state['auth_user'] = e
             st.session_state['auth_role'] = 'admin'
             st.session_state['auth_src'] = 'secrets'
+            st.query_params['s'] = _make_session_token(e, 'secrets')
             st.rerun()
         m = [u for u in active_users
              if str(u.get('email', '')).strip().lower() == e
@@ -1238,6 +1300,7 @@ def check_login():
             st.session_state['auth_user'] = e
             st.session_state['auth_role'] = (m[0].get('role') or 'user').strip().lower()
             st.session_state['auth_src'] = 'sheet'
+            st.query_params['s'] = _make_session_token(e, 'sheet')
             st.rerun()
         else:
             st.error("Invalid email or password")
@@ -1263,6 +1326,10 @@ def main():
             if _uc2.button("Logout", key="logout_btn"):
                 for _k in ('auth_user', 'auth_role', 'auth_src'):
                     st.session_state.pop(_k, None)
+                try:
+                    del st.query_params['s']
+                except Exception:
+                    pass
                 st.rerun()
         if LOGO_PAYX:
             st.markdown(f'<img src="{LOGO_PAYX}" style="height:28px;margin-bottom:8px;">', unsafe_allow_html=True)
