@@ -97,7 +97,7 @@ st.markdown("""
 # ============================================================
 # CELLCOM PRICE MAP
 # ============================================================
-APP_VERSION = "v2026-07-17-session"
+APP_VERSION = "v2026-07-17-audit-gap"
 
 CELLCOM_FIXED = {15.0, 19.0, 25.0, 29.0, 39.9, 49.0}
 CELLCOM_DISCOUNT = 5.0
@@ -119,7 +119,8 @@ HISTORY_COLS = ['date','operator_tab','sup_cbd','our_eup','diff',
                 'pending_count','refunds_eup','net_billed']
 
 DETAIL_COLS = ['date','operator_tab','category','phone','operator',
-               'product','amount','sup_date','our_date','reason','check_instruction','verified']
+               'product','amount','sup_date','our_date','reason','check_instruction','verified',
+               'verified_by','verified_at']
 
 # ---- FIX 1: Sheets connectivity check with visible banner ----
 @st.cache_resource
@@ -327,6 +328,7 @@ def save_details_to_sheets(report_date, operator_tab, rows):
     if sh is None: return False, "Not connected"
     try:
         ws = get_or_create_sheet(sh, 'Transaction Details', DETAIL_COLS)
+        _ensure_detail_headers(ws)
         all_data = ws.get_all_records()
 
         # Split: keep verified rows for this date (protect them), drop unverified for this date
@@ -378,6 +380,7 @@ def load_pending_verifications():
             continue
         try:
             ws = get_or_create_sheet(sh, 'Transaction Details', DETAIL_COLS)
+            _ensure_detail_headers(ws)
             values = _api_retry(lambda: ws.get_all_values())
             if not values:
                 continue
@@ -396,6 +399,22 @@ def load_pending_verifications():
         st.session_state.pop('pending_load_errors', None)
     return all_records
 
+@st.cache_data(ttl=120, show_spinner=False)
+def load_month_details(operator_tab, month):
+    """All Transaction Details rows of one operator for YYYY-MM (cached 2 min)."""
+    sh = get_spreadsheet(operator_tab)
+    if sh is None:
+        return []
+    try:
+        ws = sh.worksheet('Transaction Details')
+        _ensure_detail_headers(ws)
+        recs = _api_retry(lambda: ws.get_all_records())
+        return [r for r in recs
+                if str(r.get('operator_tab', '')) == operator_tab
+                and str(r.get('date', '')).startswith(month)]
+    except Exception:
+        return []
+
 def load_verified():
     all_records = []
     for op in ['partner', 'pelephone', 'cellcom']:
@@ -403,8 +422,12 @@ def load_verified():
         if sh is None: continue
         try:
             ws = get_or_create_sheet(sh, 'Transaction Details', DETAIL_COLS)
+            _ensure_detail_headers(ws)
             records = ws.get_all_records()
-            all_records.extend([r for r in records if str(r.get('verified','')).startswith('✅') or str(r.get('verified','')).startswith('❌')])
+            all_records.extend([r for r in records
+                                if str(r.get('verified','')).startswith('✅')
+                                or str(r.get('verified','')).startswith('❌')
+                                or str(r.get('verified','')).startswith('🔵')])
         except: pass
     return all_records
 
@@ -426,6 +449,29 @@ def _api_retry(fn, attempts=3):
 
 VERIFIED_COL = DETAIL_COLS.index('verified') + 1
 PHONE_COL = DETAIL_COLS.index('phone') + 1
+VERIFIED_BY_COL = DETAIL_COLS.index('verified_by') + 1
+VERIFIED_AT_COL = DETAIL_COLS.index('verified_at') + 1
+
+def _current_user():
+    return st.session_state.get('auth_user', '') or 'unknown'
+
+def _audit_cells(row_num, status):
+    """Status + who + when for one sheet row (single batch write)."""
+    return [gspread.Cell(row=row_num, col=VERIFIED_COL, value=status),
+            gspread.Cell(row=row_num, col=VERIFIED_BY_COL, value=_current_user()),
+            gspread.Cell(row=row_num, col=VERIFIED_AT_COL, value=_now_il())]
+
+def _ensure_detail_headers(ws):
+    """One-time lazy migration: extend the header row of old 12-column
+    'Transaction Details' sheets so audit values survive daily rebuilds."""
+    try:
+        hdr = ws.row_values(1)
+        if 'verified_by' not in hdr:
+            rng = f"A1:{get_column_letter(len(DETAIL_COLS))}1"
+            _api_retry(lambda: ws.batch_update(
+                [{'range': rng, 'values': [DETAIL_COLS]}]))
+    except Exception:
+        pass
 
 def _norm_cmp(p):
     return str(p or '').strip().replace('.0', '').lstrip('0')
@@ -442,7 +488,8 @@ def update_verification_by_row(sh, sheet_row, phone, new_status):
         if _norm_cmp(current_phone) != _norm_cmp(phone):
             return False, (f"Row {sheet_row} changed (holds '{current_phone}', "
                            f"expected '{phone}'). Click 🔄 Refresh and retry.")
-        _api_retry(lambda: ws.update_cell(sheet_row, VERIFIED_COL, new_status))
+        _api_retry(lambda: ws.update_cells(
+            _audit_cells(sheet_row, new_status), value_input_option='RAW'))
         return True, f"Updated {phone} (row {sheet_row})"
     except Exception as e:
         return False, f"Sheets error: {e}"
@@ -1129,7 +1176,8 @@ def build_detail_rows(report_date, operator_tab, sup_only_df, our_only_df):
                 '', r.get('Package', r.get('TOPUP_ITEM','')),
                 r.get('CBD', r.get('TOPUP_PRICE',0)),
                 str(r.get('Sup_Date','')), '',
-                r.get('Reason',''), r.get('Check_Instruction',''), '⬜ Not checked'
+                r.get('Reason',''), r.get('Check_Instruction',''), '⬜ Not checked',
+                '', ''
             ])
     if len(our_only_df) > 0:
         for _, r in our_only_df.iterrows():
@@ -1139,7 +1187,8 @@ def build_detail_rows(report_date, operator_tab, sup_only_df, our_only_df):
                 r.get('Operator',''), r.get('Product Name',''),
                 r.get('End User Price',0),
                 '', r.get('Date & Time',''),
-                r.get('Reason',''), r.get('Check_Instruction',''), '⬜ Not checked'
+                r.get('Reason',''), r.get('Check_Instruction',''), '⬜ Not checked',
+                '', ''
             ])
     return rows
 
@@ -1984,6 +2033,50 @@ def main():
                   delta_color="inverse" if total_gap>0 else "normal")
 
         st.markdown("---")
+        st.markdown("### 🔍 Verification status (live)")
+        _det = load_month_details(op_filter_pre, selected_month)
+
+        def _famt(v):
+            try:
+                return float(str(v).replace(',', '') or 0)
+            except Exception:
+                return 0.0
+
+        _res_ok = [r for r in _det if str(r.get('verified', '')).startswith('✅')]
+        _dups   = [r for r in _det if str(r.get('verified', '')).startswith('🔵')]
+        _open   = [r for r in _det if str(r.get('verified', '')).startswith('⬜')
+                   or str(r.get('verified', '')).startswith('❌')]
+        _rem_sup = sum(_famt(r.get('amount')) for r in _open
+                       if str(r.get('category', '')) == 'Supplier Only')
+        _rem_our = sum(_famt(r.get('amount')) for r in _open
+                       if str(r.get('category', '')) == 'Our Only')
+        _remaining_gap = round(_rem_sup - _rem_our, 2)
+
+        d1, d2, d3, d4 = st.columns(4)
+        d1.metric("✅ Resolved", len(_res_ok),
+                  delta=f"{sum(_famt(r.get('amount')) for r in _res_ok):,.2f} NIS",
+                  delta_color="off")
+        d2.metric("🔵 Duplicates → Refunds", len(_dups),
+                  delta=f"{sum(_famt(r.get('amount')) for r in _dups):,.2f} NIS",
+                  delta_color="off")
+        d3.metric("Open (⬜ + ❌)", len(_open),
+                  delta=f"Sup {_rem_sup:,.2f} / Our {_rem_our:,.2f} NIS",
+                  delta_color="off")
+        d4.metric("📊 Remaining Gap", f"{_remaining_gap:,.2f} NIS",
+                  delta="only ⬜ and ❌ remain here",
+                  delta_color="inverse" if _remaining_gap > 0 else "normal")
+        if _open:
+            with st.expander(f"🔎 Open items ({len(_open)}) — where the remaining gap comes from"):
+                _odf = pd.DataFrame(_open)
+                _ocols = [c for c in ['date', 'category', 'phone', 'product', 'amount',
+                                      'verified', 'verified_by', 'verified_at']
+                          if c in _odf.columns]
+                st.dataframe(_odf[_ocols], use_container_width=True, hide_index=True)
+        st.caption("Monthly Real Gap above is frozen at save time. "
+                   "Remaining Gap reflects current verification statuses "
+                   "(updates within ~2 minutes after saving a verification).")
+
+        st.markdown("---")
         df = pd.DataFrame(month_history_deduped)
         show_cols = [c for c in ['date','operator_tab','matched_count','sup_cbd','our_eup',
                                   'diff','refunds_eup','net_billed'] if c in df.columns]
@@ -2110,8 +2203,7 @@ def main():
                                 _rn = _rec.get('_row')
                                 _actual = col_phones[_rn - 1] if _rn and _rn - 1 < len(col_phones) else ''
                                 if _rn and _norm_cmp(_actual) == _norm_cmp(_rec.get('phone')):
-                                    cells.append(gspread.Cell(
-                                        row=_rn, col=VERIFIED_COL, value=_status))
+                                    cells.extend(_audit_cells(_rn, _status))
                                 else:
                                     skipped.append(display_phone(str(_rec.get('phone', ''))))
                         if cells:
@@ -2120,7 +2212,7 @@ def main():
                         st.session_state['pending_local'] = [
                             x for x in st.session_state.get('pending_local', [])
                             if (x.get('_op'), x.get('_row')) not in _saved]
-                        _msg = f"✅ partner: verified {len(cells)} record(s) in {len(_pairs)} pair(s)"
+                        _msg = f"✅ partner: verified {len({c.row for c in cells})} record(s) in {len(_pairs)} pair(s)"
                         if skipped:
                             _msg += (f" | skipped {len(skipped)} (rows moved — "
                                      f"click Refresh): {', '.join(skipped)}")
@@ -2183,14 +2275,13 @@ def main():
                                 rn = int(r['_row'])
                                 actual = col_phones[rn - 1] if rn - 1 < len(col_phones) else ''
                                 if _norm_cmp(actual) == _norm_cmp(r['Phone']):
-                                    cells.append(gspread.Cell(
-                                        row=rn, col=VERIFIED_COL, value=r['New status']))
+                                    cells.extend(_audit_cells(rn, r['New status']))
                                 else:
                                     skipped.append(str(r['Phone']))
                             if cells:
                                 _api_retry(lambda: ws_op.update_cells(
                                     cells, value_input_option='RAW'))
-                            msg = f"✅ {op_name}: saved {len(cells)}"
+                            msg = f"✅ {op_name}: saved {len({c.row for c in cells})}"
                             if skipped:
                                 msg += (f" | skipped {len(skipped)} "
                                         f"(rows moved — click Refresh): {', '.join(skipped)}")
@@ -2253,7 +2344,7 @@ def main():
             st.info("No verified transactions yet.")
             return
         df = pd.DataFrame(verified)
-        show_cols = [c for c in ['date','operator_tab','category','phone','product','amount','verified','check_instruction'] if c in df.columns]
+        show_cols = [c for c in ['date','operator_tab','category','phone','product','amount','verified','verified_by','verified_at','check_instruction'] if c in df.columns]
         st.dataframe(df[show_cols], use_container_width=True, hide_index=True)
         st.success(f"✅ {len(verified)} transactions verified")
 
