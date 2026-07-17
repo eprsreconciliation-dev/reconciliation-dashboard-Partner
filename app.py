@@ -97,7 +97,7 @@ st.markdown("""
 # ============================================================
 # CELLCOM PRICE MAP
 # ============================================================
-APP_VERSION = "v2026-07-17-email"
+APP_VERSION = "v2026-07-17-email-fix"
 
 CELLCOM_FIXED = {15.0, 19.0, 25.0, 29.0, 39.9, 49.0}
 CELLCOM_DISCOUNT = 5.0
@@ -1250,9 +1250,15 @@ def _send_daily_email(op_label, report_date, result, t):
         from email.mime.text import MIMEText
         from email.mime.application import MIMEApplication
 
-        user = str(cfg.get('smtp_user', '')).strip()
-        pw = str(cfg.get('smtp_app_password', '')).replace(' ', '').strip()
-        rcpts = [r.strip() for r in str(cfg.get('recipients', '')).split(',') if r.strip()]
+        def _clean(s):
+            # removes ALL whitespace, including non-breaking spaces (\xa0)
+            # that Google inserts between App Password groups
+            return ''.join(str(s).split())
+        user = _clean(cfg.get('smtp_user', ''))
+        pw = _clean(cfg.get('smtp_app_password', ''))
+        rcpts = [_clean(r) for r in
+                 str(cfg.get('recipients', '')).replace(';', ',').split(',')
+                 if _clean(r)]
         if not user or not pw or not rcpts:
             st.warning("📧 Email config incomplete (need smtp_user, smtp_app_password, recipients).")
             return
@@ -1261,7 +1267,7 @@ def _send_daily_email(op_label, report_date, result, t):
             _d = datetime.strptime(str(report_date), '%Y-%m-%d').strftime('%d.%m.%Y')
         except Exception:
             _d = str(report_date)
-        subj = f"{op_label} — Daily Reconciliation {_d}"
+        subj = f"{op_label} - Daily Reconciliation {_d}"
         gap = t.get('real_gap', 0)
         body = (
             f"Daily reconciliation — {op_label} — {report_date}\n\n"
