@@ -97,7 +97,7 @@ st.markdown("""
 # ============================================================
 # CELLCOM PRICE MAP
 # ============================================================
-APP_VERSION = "v2026-07-17-audit-gap"
+APP_VERSION = "v2026-07-17-email"
 
 CELLCOM_FIXED = {15.0, 19.0, 25.0, 29.0, 39.9, 49.0}
 CELLCOM_DISCOUNT = 5.0
@@ -1236,6 +1236,65 @@ def load_users():
 def _is_active(u):
     return str(u.get('active', '')).strip().lower() in ('1', 'true', 'yes', 'y')
 
+def _send_daily_email(op_label, report_date, result, t):
+    """Email the daily Excel report to CS. Configured via secrets [email].
+    Never breaks the save flow: info note if not configured, warning on failure."""
+    try:
+        cfg = dict(st.secrets["email"])
+    except Exception:
+        st.info("📧 Email not configured — report not sent (add [email] to secrets).")
+        return
+    try:
+        import smtplib
+        from email.mime.multipart import MIMEMultipart
+        from email.mime.text import MIMEText
+        from email.mime.application import MIMEApplication
+
+        user = str(cfg.get('smtp_user', '')).strip()
+        pw = str(cfg.get('smtp_app_password', '')).replace(' ', '').strip()
+        rcpts = [r.strip() for r in str(cfg.get('recipients', '')).split(',') if r.strip()]
+        if not user or not pw or not rcpts:
+            st.warning("📧 Email config incomplete (need smtp_user, smtp_app_password, recipients).")
+            return
+
+        try:
+            _d = datetime.strptime(str(report_date), '%Y-%m-%d').strftime('%d.%m.%Y')
+        except Exception:
+            _d = str(report_date)
+        subj = f"{op_label} — Daily Reconciliation {_d}"
+        gap = t.get('real_gap', 0)
+        body = (
+            f"Daily reconciliation — {op_label} — {report_date}\n\n"
+            f"Matched: {t.get('matched_count', 0)}\n"
+            f"Supplier Only: {t.get('sup_only_count', 0)} "
+            f"({t.get('sup_only_cbd', t.get('sup_only_price', 0)):,.2f} NIS)\n"
+            f"Our Only: {t.get('our_only_count', 0)} ({t.get('our_only_eup', 0):,.2f} NIS)\n"
+            f"Real Gap: {gap:,.2f} NIS\n"
+            f"Refunds: {t.get('refunds_count', 0)} ({t.get('refunds_eup', 0):,.2f} NIS)\n"
+            f"Pending: {t.get('pending_count', 0)}\n\n"
+            f"Saved by: {_current_user()} at {_now_il()}\n"
+            f"Full Excel report attached."
+        )
+        msg = MIMEMultipart()
+        msg['From'] = user
+        msg['To'] = ', '.join(rcpts)
+        msg['Subject'] = subj
+        msg.attach(MIMEText(body, 'plain', 'utf-8'))
+
+        buf = create_excel_report(result, report_date, op_label)
+        att = MIMEApplication(buf.getvalue())
+        fname = (op_label.replace(' ', '_').replace('&', 'and')
+                 + '_' + str(report_date).replace('-', '_') + '.xlsx')
+        att.add_header('Content-Disposition', 'attachment', filename=fname)
+        msg.attach(att)
+
+        with smtplib.SMTP_SSL('smtp.gmail.com', 465, timeout=30) as srv:
+            srv.login(user, pw)
+            srv.sendmail(user, rcpts, msg.as_string())
+        st.success(f"📧 Report emailed to {', '.join(rcpts)}")
+    except Exception as e:
+        st.warning(f"📧 Email failed (data was saved OK): {e}")
+
 SESSION_HOURS = 6
 
 def _session_key():
@@ -1636,6 +1695,8 @@ def main():
                         st.info(f"📋 {msg2}")
                     else:
                         st.warning(f"⚠️ Details: {msg2}")
+                    if ok:
+                        _send_daily_email('Partner & 012Talk', rdate, result, t)
 
     # ============================================================
     # PAGE: PELEPHONE
@@ -1804,6 +1865,8 @@ def main():
                         st.info(f"📋 {msg2}")
                     else:
                         st.warning(f"⚠️ Details: {msg2}")
+                    if ok:
+                        _send_daily_email('Pelephone', rdate, result, t)
 
     # ============================================================
     # PAGE: CELLCOM
@@ -1976,6 +2039,8 @@ def main():
                         st.info(f"📋 {msg2}")
                     else:
                         st.warning(f"⚠️ Details: {msg2}")
+                    if ok:
+                        _send_daily_email('Cellcom', rdate, result, t)
 
     # ============================================================
     # PAGE: MONTHLY SUMMARY
