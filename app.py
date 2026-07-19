@@ -97,7 +97,7 @@ st.markdown("""
 # ============================================================
 # CELLCOM PRICE MAP
 # ============================================================
-APP_VERSION = "v2026-07-17-roles"
+APP_VERSION = "v2026-07-19-ravkav"
 
 CELLCOM_FIXED = {15.0, 19.0, 25.0, 29.0, 39.9, 49.0}
 CELLCOM_DISCOUNT = 5.0
@@ -116,7 +116,8 @@ SCOPES = ['https://www.googleapis.com/auth/spreadsheets',
 HISTORY_COLS = ['date','operator_tab','sup_cbd','our_eup','diff',
                 'matched_count','sup_only_count','sup_only_cbd',
                 'our_only_count','our_only_eup','real_gap',
-                'pending_count','refunds_eup','net_billed']
+                'pending_count','refunds_eup','net_billed',
+                'esim_count','esim_our_total','esim_sup_total']
 
 DETAIL_COLS = ['date','operator_tab','category','phone','operator',
                'product','amount','sup_date','our_date','reason','check_instruction','verified',
@@ -238,6 +239,8 @@ def _open_spreadsheet(operator):
         raise RuntimeError("gspread client unavailable")
     if operator == 'pelephone':
         sid = st.secrets["google_sheets_pelephone"]["spreadsheet_id"]
+    elif operator == 'ravkav':
+        sid = st.secrets["google_sheets_ravkav"]["spreadsheet_id"]
     elif operator == 'cellcom':
         sid = st.secrets["google_sheets_cellcom"]["spreadsheet_id"]
     else:
@@ -275,6 +278,7 @@ def load_history(month=None, operator_tab=None):
         if month:
             dt = datetime.strptime(month, '%Y-%m')
             ws = get_or_create_sheet(sh, dt.strftime('%B %Y'), HISTORY_COLS)
+            _ensure_history_headers(ws)
             records = ws.get_all_records()
         else:
             records = []
@@ -307,6 +311,7 @@ def save_to_sheets(record):
     try:
         dt = datetime.strptime(record['date'], '%Y-%m-%d')
         ws = get_or_create_sheet(sh, dt.strftime('%B %Y'), HISTORY_COLS)
+        _ensure_history_headers(ws)
 
         # SAFE: always append, never update existing rows
         ws.append_row([record.get(c, '') for c in HISTORY_COLS])
@@ -373,7 +378,7 @@ def load_pending_verifications():
     row number (_row) and source spreadsheet (_op) for direct writes."""
     all_records = []
     errors = []
-    for op in ['partner', 'pelephone', 'cellcom']:
+    for op in ['partner', 'pelephone', 'cellcom', 'ravkav']:
         sh = get_spreadsheet(op)
         if sh is None:
             errors.append(f"{op}: not connected")
@@ -417,7 +422,7 @@ def load_month_details(operator_tab, month):
 
 def load_verified():
     all_records = []
-    for op in ['partner', 'pelephone', 'cellcom']:
+    for op in ['partner', 'pelephone', 'cellcom', 'ravkav']:
         sh = get_spreadsheet(op)
         if sh is None: continue
         try:
@@ -460,6 +465,17 @@ def _audit_cells(row_num, status):
     return [gspread.Cell(row=row_num, col=VERIFIED_COL, value=status),
             gspread.Cell(row=row_num, col=VERIFIED_BY_COL, value=_current_user()),
             gspread.Cell(row=row_num, col=VERIFIED_AT_COL, value=_now_il())]
+
+def _ensure_history_headers(ws):
+    """Lazy migration of month-sheet headers (adds eSIM columns once)."""
+    try:
+        hdr = ws.row_values(1)
+        if 'esim_count' not in hdr:
+            rng = f"A1:{get_column_letter(len(HISTORY_COLS))}1"
+            _api_retry(lambda: ws.batch_update(
+                [{'range': rng, 'values': [HISTORY_COLS]}]))
+    except Exception:
+        pass
 
 def _ensure_detail_headers(ws):
     """One-time lazy migration: extend the header row of old 12-column
@@ -1031,6 +1047,8 @@ def run_recon_pelephone(sup_df, pele_df, global_df, esim_df, report_date):
 
     esim_diffs = matched_df[matched_df['Note'].str.contains('eSIM', na=False)]
     unexpected = matched_df[matched_df['Note'].str.contains('Unexpected', na=False)]
+    esim_rows = (matched_df[matched_df['Our Operator'] == 'eSIM']
+                 if 'Our Operator' in matched_df.columns else pd.DataFrame())
 
     t = {
         'sup_price': matched_df['Supplier Price (NIS)'].sum() if len(matched_df) else 0,
@@ -1046,12 +1064,252 @@ def run_recon_pelephone(sup_df, pele_df, global_df, esim_df, report_date):
         'failed_count': len(our_failed),
         'esim_diff_count': len(esim_diffs),
         'esim_diff_total': round(esim_diffs['Difference (NIS)'].sum(), 2) if len(esim_diffs) else 0,
+        'esim_count': len(esim_rows),
+        'esim_our_total': round(esim_rows['Our EUP (NIS)'].sum(), 2) if len(esim_rows) else 0,
+        'esim_sup_total': round(esim_rows['Supplier Price (NIS)'].sum(), 2) if len(esim_rows) else 0,
         'unexpected_diff_count': len(unexpected),
     }
     t['real_gap'] = round(t['sup_only_price'] - t['our_only_eup'], 2)
 
     return {'matched': matched_df, 'sup_only': sup_only_df, 'our_only': our_only_df,
             'refunds': our_refunds, 'failed': our_failed, 'totals': t}
+
+# ============================================================
+# RAVKAV
+# ============================================================
+RK_CHARGED = 'חויב'
+RK_FAILED = 'נכשל'
+RK_REFUNDED = 'זוכה'
+
+def load_ravkav_our(file_bytes):
+    """Our System Logs export for RavKav. Extracts the RavKav uid and card
+    serial from the embedded JSON so transactions match 1:1 with RavKav."""
+    try:
+        text = None
+        for enc in ['utf-8-sig', 'utf-8', 'windows-1255', 'cp1255', 'latin1']:
+            try:
+                text = file_bytes.decode(enc); break
+            except Exception:
+                continue
+        df = pd.read_csv(StringIO(text), dtype=str, on_bad_lines='skip')
+        df['End User Price'] = pd.to_numeric(df.get('End User Price', 0), errors='coerce').fillna(0)
+        if 'Error details' in df.columns:
+            det = df['Error details'].fillna('')
+        else:
+            det = pd.Series([''] * len(df), index=df.index)
+        df['uid'] = det.str.extract(r'"uid": "([0-9a-fA-F\-]{36})"', expand=False).fillna('')
+        df['card_serial'] = det.str.extract(r'"card_serial": "([^"]+)"', expand=False).fillna('')
+        try:
+            df['_dt'] = pd.to_datetime(df['Date & Time'], dayfirst=True, errors='coerce')
+        except Exception:
+            df['_dt'] = pd.NaT
+        return df, None
+    except Exception as e:
+        return None, str(e)
+
+def load_ravkav_totals(file_bytes):
+    """RavKav daily one-line totals report. Amounts arrive in agorot -> NIS."""
+    try:
+        text = None
+        for enc in ['utf-8-sig', 'utf-8', 'windows-1255', 'cp1255', 'latin1']:
+            try:
+                text = file_bytes.decode(enc); break
+            except Exception:
+                continue
+        df = pd.read_csv(StringIO(text))
+        if len(df) == 0:
+            return None, "Totals file is empty"
+        needed = ['Total Charged Amount', 'Total Refunded Amount', 'Net Total Charged Amount']
+        missing = [c for c in needed if c not in df.columns]
+        if missing:
+            return None, f"Missing columns: {missing}"
+        row = df.iloc[0]
+        def agorot(col):
+            try:
+                return round(float(row.get(col, 0) or 0) / 100.0, 2)
+            except Exception:
+                return 0.0
+        return {
+            'charged': agorot('Total Charged Amount'),
+            'refunded': agorot('Total Refunded Amount'),
+            'net': agorot('Net Total Charged Amount'),
+            'balance_charged': agorot('Balance Charged Amount'),
+            'cc_charged': agorot('Credit Card Charged Amount'),
+        }, None
+    except Exception as e:
+        return None, str(e)
+
+def load_ravkav_detailed(file_bytes):
+    """RavKav detailed transaction report (xlsx) — requested on discrepancies."""
+    try:
+        df = pd.read_excel(BytesIO(file_bytes))
+        needed = ['uid', 'transaction_status', 'charged_amount', 'card__serial_number']
+        missing = [c for c in needed if c not in df.columns]
+        if missing:
+            return None, f"Missing columns: {missing}"
+        df['uid'] = df['uid'].astype(str).str.strip()
+        df['charged_amount'] = pd.to_numeric(df['charged_amount'], errors='coerce').fillna(0)
+        df['card__serial_number'] = df['card__serial_number'].astype(str)
+        return df, None
+    except Exception as e:
+        return None, str(e)
+
+def run_recon_ravkav(our_df, sup_totals, sup_det, report_date):
+    """Totals comparison + optional uid-level detailed comparison."""
+    act = our_df['Action'] if 'Action' in our_df.columns else 'PURCHASE'
+    stat = our_df['Status'] if 'Status' in our_df.columns else ''
+    done = our_df[(act == 'PURCHASE') & (stat == 'DONE')].copy()
+    failed = our_df[stat == 'FAILED'].copy()
+    cancelled = our_df[stat == 'CANCELLED'].copy()
+    adjustments = done[done['uid'] == ''].copy()
+
+    our_charged = round(float(done['End User Price'].sum()), 2)
+    our_refunded = round(float(cancelled['End User Price'].sum()), 2)
+
+    t = {
+        'done_count': len(done), 'failed_count': len(failed),
+        'cancelled_count': len(cancelled),
+        'adj_count': len(adjustments),
+        'adj_sum': round(float(adjustments['End User Price'].sum()), 2) if len(adjustments) else 0.0,
+        'our_charged': our_charged, 'our_refunded': our_refunded,
+        'sup_charged': None, 'sup_refunded': None, 'sup_net': None,
+        'gap_charged': 0.0, 'gap_refunded': 0.0, 'gap_net': 0.0,
+        'matched_count': len(done), 'pending_count': 0,
+        'refunds_count': len(cancelled), 'refunds_eup': round(-our_refunded, 2),
+    }
+    if sup_totals:
+        t['sup_charged'] = sup_totals['charged']
+        t['sup_refunded'] = sup_totals['refunded']
+        t['sup_net'] = sup_totals['net']
+        t['gap_charged'] = round(sup_totals['charged'] - our_charged, 2)
+        t['gap_refunded'] = round(sup_totals['refunded'] - our_refunded, 2)
+        t['gap_net'] = round(sup_totals['net'] - (our_charged - our_refunded), 2)
+
+    detailed = None
+    sup_rows, our_rows = [], []
+    if sup_det is not None:
+        ours_uid = {r['uid']: r for _, r in our_df[our_df['uid'] != ''].iterrows()}
+        theirs_uid = {r['uid']: r for _, r in sup_det.iterrows()}
+        both = set(ours_uid) & set(theirs_uid)
+        only_ours_ids = sorted(set(ours_uid) - set(theirs_uid))
+        only_theirs_ids = sorted(set(theirs_uid) - set(ours_uid))
+
+        failed_but_charged, done_not_charged, amount_mismatch = [], [], []
+        agree = 0
+        for u in both:
+            o, s = ours_uid[u], theirs_uid[u]
+            s_charged = s['transaction_status'] == RK_CHARGED
+            if o['Status'] == 'FAILED' and s_charged:
+                failed_but_charged.append((o, s))
+            elif o['Status'] == 'DONE' and s['transaction_status'] == RK_FAILED:
+                done_not_charged.append((o, s))
+            elif o['Status'] == 'DONE' and s_charged \
+                    and abs(float(o['End User Price']) - float(s['charged_amount'])) > 0.01:
+                amount_mismatch.append((o, s))
+            else:
+                agree += 1
+
+        def _disp(pairs):
+            return pd.DataFrame([{
+                'uid': str(o.get('uid') or s.get('uid'))[:13] + '…',
+                'Card': str(s.get('card__serial_number', o.get('card_serial', ''))),
+                'Our status': o.get('Status', ''),
+                'RavKav status': s.get('transaction_status', ''),
+                'Our client price (NIS)': float(o.get('End User Price', 0)),
+                'RavKav amount (NIS)': float(s.get('charged_amount', 0)),
+                'Date & Time': str(o.get('Date & Time', '')),
+            } for o, s in pairs])
+
+        detailed = {
+            'matched_count': agree,
+            'failed_but_charged': _disp(failed_but_charged),
+            'done_not_charged': _disp(done_not_charged),
+            'amount_mismatch': _disp(amount_mismatch),
+            'only_ours': pd.DataFrame([{
+                'uid': u[:13] + '…',
+                'Card': str(ours_uid[u].get('card_serial', '')),
+                'Our status': ours_uid[u].get('Status', ''),
+                'Our client price (NIS)': float(ours_uid[u].get('End User Price', 0)),
+                'Date & Time': str(ours_uid[u].get('Date & Time', '')),
+            } for u in only_ours_ids]),
+            'only_theirs': pd.DataFrame([{
+                'uid': u[:13] + '…',
+                'Card': str(theirs_uid[u].get('card__serial_number', '')),
+                'RavKav status': theirs_uid[u].get('transaction_status', ''),
+                'RavKav amount (NIS)': float(theirs_uid[u].get('charged_amount', 0)),
+            } for u in only_theirs_ids]),
+            'adjustments': (adjustments[['Date & Time', 'Transaction ID', 'End User Price']]
+                            .rename(columns={'End User Price': 'Client price (NIS)'})
+                            if len(adjustments) else pd.DataFrame()),
+        }
+
+        for o, s in failed_but_charged:
+            sup_rows.append({
+                'Phone_Display': str(s.get('card__serial_number', '')),
+                'Sup_Date': str(o.get('Date & Time', report_date)), 'Package': 'RavKav',
+                'CBD': float(s.get('charged_amount', 0)),
+                'Reason': 'Charged by RavKav, FAILED in our system',
+                'Check_Instruction': 'Verify the card was actually reloaded; '
+                                     'if yes — fix our status, if no — request a refund from RavKav.',
+            })
+        for u in only_theirs_ids:
+            s = theirs_uid[u]
+            sup_rows.append({
+                'Phone_Display': str(s.get('card__serial_number', '')),
+                'Sup_Date': str(report_date), 'Package': 'RavKav',
+                'CBD': float(s.get('charged_amount', 0)),
+                'Reason': 'At RavKav only — missing in our log',
+                'Check_Instruction': 'Transaction exists at RavKav but not in our system — investigate with RavKav.',
+            })
+        for o, s in done_not_charged:
+            our_rows.append({
+                'Phone_Display': str(o.get('Phone Number', '')), 'Operator': 'RavKav',
+                'Product Name': 'RavKav', 'End User Price': float(o.get('End User Price', 0)),
+                'Date & Time': str(o.get('Date & Time', '')),
+                'Reason': 'DONE in our system, failed at RavKav',
+                'Check_Instruction': 'Verify whether the client was charged; align statuses with RavKav.',
+            })
+        for u in only_ours_ids:
+            o = ours_uid[u]
+            our_rows.append({
+                'Phone_Display': str(o.get('Phone Number', '')), 'Operator': 'RavKav',
+                'Product Name': 'RavKav', 'End User Price': float(o.get('End User Price', 0)),
+                'Date & Time': str(o.get('Date & Time', '')),
+                'Reason': 'In our log only — uid unknown to RavKav',
+                'Check_Instruction': 'Verify the transaction with RavKav.',
+            })
+        for _, o in adjustments.iterrows():
+            our_rows.append({
+                'Phone_Display': str(o.get('Phone Number', '')), 'Operator': 'RavKav',
+                'Product Name': 'Manual adjustment', 'End User Price': float(o.get('End User Price', 0)),
+                'Date & Time': str(o.get('Date & Time', '')),
+                'Reason': 'Manual adjustment (no RavKav uid)',
+                'Check_Instruction': 'Confirm the adjustment is intentional and documented.',
+            })
+
+    sup_only_df = pd.DataFrame(sup_rows)
+    our_only_df = pd.DataFrame(our_rows)
+    t['sup_only_count'] = len(sup_only_df)
+    t['sup_only_cbd'] = round(float(sup_only_df['CBD'].sum()), 2) if len(sup_only_df) else 0.0
+    t['our_only_count'] = len(our_only_df)
+    t['our_only_eup'] = round(float(our_only_df['End User Price'].sum()), 2) if len(our_only_df) else 0.0
+    if sup_totals:
+        t['real_gap'] = t['gap_net']
+    elif sup_det is not None:
+        their_charged = round(float(
+            sup_det[sup_det['transaction_status'] == RK_CHARGED]['charged_amount'].sum()), 2)
+        t['real_gap'] = round(their_charged - our_charged, 2)
+    else:
+        t['real_gap'] = 0.0
+
+    refunds_df = pd.DataFrame([{
+        'Operator': 'RavKav', 'Phone_Display': str(r.get('Phone Number', '')),
+        'Date & Time': str(r.get('Date & Time', '')), 'Product Name': 'RavKav',
+        'End User Price': float(r.get('End User Price', 0)),
+    } for _, r in cancelled.iterrows()])
+
+    return {'matched': pd.DataFrame(), 'sup_only': sup_only_df, 'our_only': our_only_df,
+            'refunds': refunds_df, 'failed': failed, 'totals': t, 'detailed': detailed}
 
 # ============================================================
 # SHARED UI COMPONENTS
@@ -1281,6 +1539,12 @@ def _send_daily_email(op_label, report_date, result, t):
             f"Saved by: {_current_user()} at {_now_il()}\n"
             f"Full Excel report attached."
         )
+        if t.get('esim_count'):
+            _ed = t.get('esim_sup_total', 0) - t.get('esim_our_total', 0)
+            body += (f"\n\neSIM: {t.get('esim_count')} transactions | "
+                     f"our {t.get('esim_our_total', 0):,.2f} NIS | "
+                     f"supplier {t.get('esim_sup_total', 0):,.2f} NIS | "
+                     f"price diff {_ed:,.2f} NIS")
         msg = MIMEMultipart()
         msg['From'] = user
         msg['To'] = ', '.join(rcpts)
@@ -1451,6 +1715,7 @@ def main():
             "📱 Partner + 012Talk Reconciliation",
             "⭐ Pelephone Reconciliation",
             "📡 Cellcom Reconciliation",
+            "🚌 RavKav Reconciliation",
             "📅 Monthly Summary",
             "⏳ Pending Verification",
             "✅ Verified",
@@ -1475,7 +1740,7 @@ def main():
         if 'sidebar_stats' not in st.session_state:
             total_days = 0
             last_date = None
-            for op in ['partner', 'pelephone', 'cellcom']:
+            for op in ['partner', 'pelephone', 'cellcom', 'ravkav']:
                 h = load_history(operator_tab=op)
                 total_days += len(h)
                 if h and (last_date is None or h[-1].get('date','') > last_date):
@@ -1504,9 +1769,9 @@ def main():
     # PAGE: PARTNER + 012TALK
     # ============================================================
     # Clear save flags when switching pages
-    for _key in ['pt_do_save', 'pe_do_save', 'ce_do_save']:
+    for _key in ['pt_do_save', 'pe_do_save', 'ce_do_save', 'rk_do_save']:
         if _key in st.session_state and not page.startswith(
-            {'pt': '📱', 'pe': '⭐', 'ce': '📡'}[_key[:2]]):
+            {'pt': '📱', 'pe': '⭐', 'ce': '📡', 'rk': '🚌'}[_key[:2]]):
             st.session_state.pop(_key, None)
 
     if page == "📱 Partner + 012Talk Reconciliation":
@@ -1612,7 +1877,7 @@ def main():
                     late = result['our_only'].get('Is_Late', pd.Series(dtype=bool)).sum() if 'Is_Late' in result['our_only'].columns else 0
                     if late > 0: st.warning(f"⏰ {late} transaction(s) after 22:00 — likely in tomorrow's supplier report")
                     show = result['our_only'][['Phone_Display','Date & Time','Operator','Product Name','End User Price','Check_Instruction']].copy()
-                    show.columns = ['Phone','Date & Time','Operator','Product','EUP (NIS)','What to check']
+                    show.columns = ['Phone','Date & Time','Operator','Product','Client price (NIS)','What to check']
                     st.dataframe(show, use_container_width=True, hide_index=True)
                     st.info(f"Total: {t['our_only_count']} phones | {t['our_only_eup']:,.2f} NIS")
                 else: st.success("✅ No our-only records!")
@@ -1624,17 +1889,19 @@ def main():
                 else: st.success("✅ No supplier vs pending conflicts!")
             with tabs[4]:
                 if len(result['matched']) > 0:
-                    st.dataframe(result['matched'], use_container_width=True, hide_index=True)
+                    st.dataframe(result['matched'].rename(
+                        columns={'Our EUP (NIS)': 'Our Client Price (NIS)'}),
+                        use_container_width=True, hide_index=True)
                 else: st.info("No matched records")
             with tabs[5]:
                 if len(result['pending']) > 0:
                     st.warning(f"⚠️ {t['pending_count']} pending")
-                    show = result['pending'][['Phone_Display','Date & Time','Operator','Product Name','End User Price']].rename(columns={'Phone_Display':'Phone','End User Price':'EUP (NIS)'})
+                    show = result['pending'][['Phone_Display','Date & Time','Operator','Product Name','End User Price']].rename(columns={'Phone_Display':'Phone','End User Price':'Client price (NIS)'})
                     st.dataframe(show, use_container_width=True, hide_index=True)
                 else: st.success("✅ No pending!")
             with tabs[6]:
                 if len(result['refunds']) > 0:
-                    show = result['refunds'][['Operator','Phone_Display','Date & Time','Product Name','End User Price']].rename(columns={'Phone_Display':'Phone','End User Price':'EUP (NIS)'})
+                    show = result['refunds'][['Operator','Phone_Display','Date & Time','Product Name','End User Price']].rename(columns={'Phone_Display':'Phone','End User Price':'Client price (NIS)'})
                     st.dataframe(show, use_container_width=True, hide_index=True)
                 else: st.info("No refunds")
             with tabs[7]:
@@ -1646,7 +1913,7 @@ def main():
             st.markdown("---")
             st.markdown("### 💰 Net Billing Summary")
             net_data = {
-                'Item': ['Our EUP — DONE+CANCELLED','Refunds (credit back)','PENDING',
+                'Item': ['Client charges — DONE+CANCELLED','Refunds (credit back)','PENDING',
                          'NET Our Total','Supplier CBD (matched)','Supplier Only CBD','📊 Real Gap'],
                 'Partner (NIS)': [round(t['partner_eup'],2), round(t['partner_ref'],2), round(t['pending_eup'],2),
                                   round(t['partner_eup']+t['partner_ref'],2), '—','—','—'],
@@ -1775,8 +2042,9 @@ def main():
                       delta=f"{t['sup_only_price']:,.2f} NIS", delta_color="inverse")
             c3.metric("⚠️ Our Only", t['our_only_count'],
                       delta=f"{t['our_only_eup']:,.2f} NIS", delta_color="inverse")
-            c4.metric("📟 eSIM Diffs", t['esim_diff_count'],
-                      delta=f"{t['esim_diff_total']:,.2f} NIS (expected +2.67 each)", delta_color="off")
+            c4.metric("📟 eSIM", t.get('esim_count', 0),
+                      delta=f"our {t.get('esim_our_total', 0):,.2f} / sup {t.get('esim_sup_total', 0):,.2f} NIS",
+                      delta_color="off")
             gap = t['real_gap']
             c5.metric("📊 Real Gap",
                       f"+{gap:,.2f} NIS" if gap>0 else (f"{gap:,.2f} NIS" if gap<0 else "0.00 NIS ✅"),
@@ -1798,9 +2066,20 @@ def main():
             ])
             with tabs[0]:
                 render_summary_tab(result['sup_only'], result['our_only'], t, rdate, 'pelephone')
-                if t['esim_diff_count'] > 0:
-                    st.markdown("#### 📟 eSIM Price Difference")
-                    st.info(f"eSIM: {t['esim_diff_count']} transactions | Expected diff: +{t['esim_diff_count']*2.67:.2f} NIS | Actual: {t['esim_diff_total']:,.2f} NIS")
+                if t.get('esim_count', 0) > 0:
+                    st.markdown("#### 📟 eSIM Summary")
+                    _es_diff = round(t.get('esim_sup_total', 0) - t.get('esim_our_total', 0), 2)
+                    st.dataframe(pd.DataFrame({
+                        'Item': ['eSIM transactions',
+                                 'Our client price total (NIS)',
+                                 'Supplier price total (NIS)',
+                                 'Price difference — supplier minus ours (NIS)'],
+                        'Value': [t.get('esim_count', 0),
+                                  f"{t.get('esim_our_total', 0):,.2f}",
+                                  f"{t.get('esim_sup_total', 0):,.2f}",
+                                  f"{_es_diff:,.2f}"],
+                    }), use_container_width=True, hide_index=True)
+                    st.caption("Expected difference is +2.67 NIS per eSIM (supplier 7.67 vs our 5.00).")
                 if t['unexpected_diff_count'] > 0:
                     st.warning(f"⚠️ {t['unexpected_diff_count']} transaction(s) with unexpected price differences — check Matched tab")
             with tabs[1]:
@@ -1815,17 +2094,19 @@ def main():
             with tabs[2]:
                 if len(result['our_only']) > 0:
                     show = result['our_only'][['Phone_Display','Date & Time','Operator','Product Name','End User Price','Check_Instruction']].rename(
-                        columns={'Phone_Display':'Phone','End User Price':'EUP (NIS)','Check_Instruction':'What to check'})
+                        columns={'Phone_Display':'Phone','End User Price':'Client price (NIS)','Check_Instruction':'What to check'})
                     st.dataframe(show, use_container_width=True, hide_index=True)
                 else: st.success("✅ No our-only!")
             with tabs[3]:
                 if len(result['matched']) > 0:
-                    st.dataframe(result['matched'], use_container_width=True, hide_index=True)
+                    st.dataframe(result['matched'].rename(
+                        columns={'Our EUP (NIS)': 'Our Client Price (NIS)'}),
+                        use_container_width=True, hide_index=True)
                 else: st.info("No matched records")
             with tabs[4]:
                 if len(result['refunds']) > 0:
                     show = result['refunds'][['Operator','Phone_Display','Date & Time','Product Name','End User Price']].rename(
-                        columns={'Phone_Display':'Phone','End User Price':'EUP (NIS)'})
+                        columns={'Phone_Display':'Phone','End User Price':'Client price (NIS)'})
                     st.dataframe(show, use_container_width=True, hide_index=True)
                 else: st.info("No refunds")
             with tabs[5]:
@@ -1859,6 +2140,9 @@ def main():
                         'our_only_count': t['our_only_count'], 'our_only_eup': round(t['our_only_eup'],2),
                         'real_gap': round(t['real_gap'],2), 'pending_count': 0,
                         'refunds_eup': round(t['refunds_eup'],2), 'net_billed': round(t['our_eup'],2),
+                        'esim_count': t.get('esim_count', 0),
+                        'esim_our_total': round(t.get('esim_our_total', 0), 2),
+                        'esim_sup_total': round(t.get('esim_sup_total', 0), 2),
                     }
                     ok, msg = save_to_sheets(record)
                     detail_rows = build_detail_rows(rdate, 'pelephone', result['sup_only'], result['our_only'])
@@ -1985,12 +2269,14 @@ def main():
             with tabs[2]:
                 if len(result['our_only']) > 0:
                     show = result['our_only'][['Phone_Display','Date & Time','Product Name','End User Price','Check_Instruction']].rename(
-                        columns={'Phone_Display':'Phone','End User Price':'EUP (NIS)','Check_Instruction':'What to check'})
+                        columns={'Phone_Display':'Phone','End User Price':'Client price (NIS)','Check_Instruction':'What to check'})
                     st.dataframe(show, use_container_width=True, hide_index=True)
                 else: st.success("✅ No our-only!")
             with tabs[3]:
                 if len(result['matched']) > 0:
-                    st.dataframe(result['matched'], use_container_width=True, hide_index=True)
+                    st.dataframe(result['matched'].rename(
+                        columns={'Our EUP (NIS)': 'Our Client Price (NIS)'}),
+                        use_container_width=True, hide_index=True)
                     if len(result['anomalies']) > 0:
                         st.warning(f"⚠️ {len(result['anomalies'])} transaction(s) with unexpected price diff:")
                         st.dataframe(result['anomalies'], use_container_width=True, hide_index=True)
@@ -1998,7 +2284,7 @@ def main():
             with tabs[4]:
                 if len(result['refunds']) > 0:
                     show = result['refunds'][['Phone_Display','Date & Time','Product Name','End User Price']].rename(
-                        columns={'Phone_Display':'Phone','End User Price':'EUP (NIS)'})
+                        columns={'Phone_Display':'Phone','End User Price':'Client price (NIS)'})
                     st.dataframe(show, use_container_width=True, hide_index=True)
                 else: st.info("No refunds")
             with tabs[5]:
@@ -2051,9 +2337,163 @@ def main():
     # ============================================================
     # PAGE: MONTHLY SUMMARY
     # ============================================================
+    elif page == "🚌 RavKav Reconciliation":
+        render_header("RavKav Reconciliation",
+                      "Daily totals check + uid-level investigation",
+                      [LOGO_PAYX], extra_labels=['RavKav'])
+        st.caption("Client price (NIS) = the amount paid by the end client "
+                   "(column 'End User Price' in our system export).")
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.markdown("**1️⃣ Our System Logs (.csv)**")
+            rk_our_file = st.file_uploader("RavKav ours", type=['csv'],
+                                           label_visibility="collapsed", key="rk_our")
+            st.caption("Export from our system — RavKav operator")
+        with col2:
+            st.markdown("**2️⃣ RavKav Daily Totals (.csv)**")
+            rk_tot_file = st.file_uploader("RavKav totals", type=['csv'],
+                                           label_visibility="collapsed", key="rk_tot")
+            st.caption("One-line totals report (amounts in agorot)")
+        with col3:
+            st.markdown("**3️⃣ RavKav Detailed Report (.xlsx) — optional**")
+            rk_det_file = st.file_uploader("RavKav detailed", type=['xlsx', 'xls'],
+                                           label_visibility="collapsed", key="rk_det")
+            st.caption("Request from RavKav when totals do not match")
+
+        if rk_our_file and (rk_tot_file or rk_det_file):
+            if st.button("▶ Run Reconciliation", type="primary",
+                         use_container_width=True, key="rk_run"):
+                with st.spinner("Processing..."):
+                    our_df, e1 = load_ravkav_our(rk_our_file.read())
+                    if e1: st.error(f"Our file error: {e1}"); return
+                    sup_totals, sup_det = None, None
+                    if rk_tot_file:
+                        sup_totals, e2 = load_ravkav_totals(rk_tot_file.read())
+                        if e2: st.error(f"Totals file error: {e2}"); return
+                    if rk_det_file:
+                        sup_det, e3 = load_ravkav_detailed(rk_det_file.read())
+                        if e3: st.error(f"Detailed file error: {e3}"); return
+                    auto_date = date.today().strftime('%Y-%m-%d')
+                    try:
+                        _dts = our_df['_dt'].dropna()
+                        if len(_dts) > 0:
+                            auto_date = _dts.max().strftime('%Y-%m-%d')
+                            st.info(f"📅 Date detected: **{auto_date}**")
+                    except Exception:
+                        pass
+                    result = run_recon_ravkav(our_df, sup_totals, sup_det, auto_date)
+                    st.session_state['rk_result'] = result
+                    st.session_state['rk_date'] = auto_date
+                    st.success("✅ Complete!")
+
+        if 'rk_result' in st.session_state:
+            result = st.session_state['rk_result']
+            t = result['totals']
+            rdate = st.session_state['rk_date']
+
+            st.markdown("---")
+            c1, c2, c3, c4, c5 = st.columns(5)
+            c1.metric("✅ Charged (ours)", t['done_count'],
+                      delta=f"{t['our_charged']:,.2f} NIS", delta_color="off")
+            c2.metric("🔴 Failed (ours)", t['failed_count'])
+            c3.metric("↩️ Refunded (ours)", t['cancelled_count'],
+                      delta=f"{t['our_refunded']:,.2f} NIS", delta_color="off")
+            if t.get('sup_charged') is not None:
+                c4.metric("RavKav charged", f"{t['sup_charged']:,.2f} NIS",
+                          delta=f"refunded {t['sup_refunded']:,.2f} NIS", delta_color="off")
+                c5.metric("📊 Gap", f"{t['gap_net']:,.2f} NIS",
+                          delta="RavKav net minus our net",
+                          delta_color="inverse" if abs(t['gap_net']) > 0.009 else "off")
+
+            if t.get('sup_charged') is not None:
+                if abs(t['gap_charged']) < 0.01 and abs(t['gap_refunded']) < 0.01:
+                    st.success("✅ Amounts match — charges and refunds are identical on both sides.")
+                else:
+                    if abs(t['gap_charged']) >= 0.01:
+                        st.error(f"⚠️ Charged amounts differ by {t['gap_charged']:,.2f} NIS "
+                                 f"(ours {t['our_charged']:,.2f} vs RavKav {t['sup_charged']:,.2f})")
+                    if abs(t['gap_refunded']) >= 0.01:
+                        st.error(f"⚠️ Refunded amounts differ by {t['gap_refunded']:,.2f} NIS "
+                                 f"(ours {t['our_refunded']:,.2f} vs RavKav {t['sup_refunded']:,.2f})")
+                    if t['adj_count']:
+                        st.warning(f"🧾 Manual adjustments in our log (no RavKav uid): "
+                                   f"{t['adj_count']} row(s), {t['adj_sum']:,.2f} NIS — "
+                                   f"part of the difference")
+                    st.info("Request the detailed report from RavKav and upload it "
+                            "as file 3️⃣ for a uid-level breakdown.")
+
+            if result.get('detailed') is not None:
+                d = result['detailed']
+                st.markdown("### 🔬 Detailed uid-level comparison")
+                dd1, dd2, dd3, dd4 = st.columns(4)
+                dd1.metric("✅ Matching uids", d['matched_count'])
+                dd2.metric("⚠️ Failed here / charged there", len(d['failed_but_charged']))
+                dd3.metric("Only in our log", len(d['only_ours']))
+                dd4.metric("Only at RavKav", len(d['only_theirs']))
+                for _title, _key in [
+                        ("⚠️ FAILED in our system but CHARGED by RavKav — main suspects", 'failed_but_charged'),
+                        ("DONE in our system but failed at RavKav", 'done_not_charged'),
+                        ("Amount mismatches", 'amount_mismatch'),
+                        ("Only in our log (uid unknown to RavKav)", 'only_ours'),
+                        ("Only at RavKav", 'only_theirs'),
+                        ("🧾 Manual adjustments (no uid)", 'adjustments')]:
+                    _dfx = d[_key]
+                    if len(_dfx) > 0:
+                        st.markdown(f"**{_title} ({len(_dfx)})**")
+                        st.dataframe(_dfx, use_container_width=True, hide_index=True)
+
+                render_action_required(result['sup_only'], result['our_only'], rdate)
+
+            st.markdown("---")
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("💾 Save to Monthly History", use_container_width=True, key="rk_save"):
+                    if check_sheets_banner():
+                        st.session_state['rk_do_save'] = True
+            with col2:
+                excel_buf = create_excel_report(result, rdate, 'RavKav')
+                st.download_button("📥 Download Excel Report", data=excel_buf,
+                    file_name=f"RavKav_{rdate.replace('-','_')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True, type="primary")
+
+            if st.session_state.get('rk_do_save'):
+                if save_confirmation_ui(rdate, 'ravkav', 'rk'):
+                    st.session_state.pop('rk_do_save', None)
+                    _sup_cbd = t['sup_charged'] if t.get('sup_charged') is not None \
+                        else round(t['our_charged'] + t['real_gap'], 2)
+                    record = {
+                        'date': rdate, 'operator_tab': 'ravkav',
+                        'sup_cbd': round(_sup_cbd, 2), 'our_eup': round(t['our_charged'], 2),
+                        'diff': round(t['gap_charged'], 2),
+                        'matched_count': t['done_count'],
+                        'sup_only_count': t['sup_only_count'],
+                        'sup_only_cbd': round(t['sup_only_cbd'], 2),
+                        'our_only_count': t['our_only_count'],
+                        'our_only_eup': round(t['our_only_eup'], 2),
+                        'real_gap': round(t['real_gap'], 2), 'pending_count': 0,
+                        'refunds_eup': round(t['refunds_eup'], 2),
+                        'net_billed': round(t['our_charged'] - t['our_refunded'], 2),
+                    }
+                    ok, msg = save_to_sheets(record)
+                    detail_rows = build_detail_rows(rdate, 'ravkav',
+                                                    result['sup_only'], result['our_only'])
+                    ok2, msg2 = save_details_to_sheets(rdate, 'ravkav', detail_rows)
+                    if ok:
+                        st.cache_data.clear()
+                        st.success(f"✅ {msg}")
+                    else:
+                        st.warning(f"⚠️ {msg}")
+                    if ok2:
+                        st.info(f"📋 {msg2}")
+                    else:
+                        st.warning(f"⚠️ Details: {msg2}")
+                    if ok:
+                        _send_daily_email('RavKav', rdate, result, t)
+
     elif page == "📅 Monthly Summary":
         render_header("Monthly Summary", "All operators — month overview", [LOGO_PAYX])
-        op_filter_pre = st.selectbox("Operator", ["partner","pelephone","cellcom"], key="op_pre")
+        op_filter_pre = st.selectbox("Operator", ["partner","pelephone","cellcom","ravkav"], key="op_pre")
         sh = get_spreadsheet(op_filter_pre)
         available_months = []
         if sh is not None:
@@ -2098,7 +2538,7 @@ def main():
         c1,c2,c3,c4,c5 = st.columns(5)
         c1.metric("📅 Days", len(month_history_deduped))
         c2.metric("Supplier Total", f"{total_sup:,.2f} NIS")
-        c3.metric("Our EUP Total", f"{total_eup:,.2f} NIS")
+        c3.metric("Client Charges Total", f"{total_eup:,.2f} NIS")
         c4.metric("↩️ Refunds", f"{total_ref:,.2f} NIS")
         c5.metric("📊 Monthly Real Gap", f"{total_gap:,.2f} NIS",
                   delta_color="inverse" if total_gap>0 else "normal")
@@ -2150,8 +2590,25 @@ def main():
         st.markdown("---")
         df = pd.DataFrame(month_history_deduped)
         show_cols = [c for c in ['date','operator_tab','matched_count','sup_cbd','our_eup',
-                                  'diff','refunds_eup','net_billed'] if c in df.columns]
-        st.dataframe(df[show_cols], use_container_width=True, hide_index=True)
+                                  'diff','real_gap','refunds_eup','net_billed'] if c in df.columns]
+        _disp = df[show_cols].copy()
+        _tot = {c: '' for c in show_cols}
+        _tot['date'] = '📊 TOTAL'
+        if 'operator_tab' in _tot:
+            _tot['operator_tab'] = op_filter_pre
+        for _c in ['matched_count', 'sup_cbd', 'our_eup', 'diff', 'real_gap',
+                   'refunds_eup', 'net_billed']:
+            if _c in show_cols:
+                _tot[_c] = round(float(pd.to_numeric(df[_c], errors='coerce').fillna(0).sum()), 2)
+        _disp = pd.concat([_disp, pd.DataFrame([_tot])], ignore_index=True)
+        st.dataframe(_disp, use_container_width=True, hide_index=True)
+        if op_filter_pre == 'pelephone' and 'esim_count' in df.columns:
+            _en = pd.to_numeric(df['esim_count'], errors='coerce').fillna(0).sum()
+            _eo = pd.to_numeric(df.get('esim_our_total'), errors='coerce').fillna(0).sum()
+            _esu = pd.to_numeric(df.get('esim_sup_total'), errors='coerce').fillna(0).sum()
+            st.caption(f"📟 eSIM this month: {int(_en)} transactions | "
+                       f"our {_eo:,.2f} NIS | supplier {_esu:,.2f} NIS | "
+                       f"price diff {_esu - _eo:,.2f} NIS")
 
         month_label = datetime.strptime(selected_month, '%Y-%m').strftime('%B %Y')
         st.download_button(
@@ -2175,11 +2632,11 @@ def main():
                 st.rerun()
         with col_f:
             saved_filter = st.session_state.get('pending_op_filter_saved', 'All')
+            _op_opts = ["All", "partner", "pelephone", "cellcom", "ravkav"]
             op_filter = st.selectbox(
                 "Filter by operator:",
-                ["All", "partner", "pelephone", "cellcom"],
-                index=["All", "partner", "pelephone", "cellcom"].index(saved_filter)
-                    if saved_filter in ["All", "partner", "pelephone", "cellcom"] else 0,
+                _op_opts,
+                index=_op_opts.index(saved_filter) if saved_filter in _op_opts else 0,
                 key="pending_op_filter"
             )
             st.session_state['pending_op_filter_saved'] = op_filter
