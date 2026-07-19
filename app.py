@@ -97,7 +97,7 @@ st.markdown("""
 # ============================================================
 # CELLCOM PRICE MAP
 # ============================================================
-APP_VERSION = "v2026-07-17-email-fix"
+APP_VERSION = "v2026-07-17-roles"
 
 CELLCOM_FIXED = {15.0, 19.0, 25.0, 29.0, 39.9, 49.0}
 CELLCOM_DISCOUNT = 5.0
@@ -1361,7 +1361,7 @@ def check_login():
                 if _src == 'secrets' and fb \
                         and _e == str(fb.get('email', '')).strip().lower():
                     st.session_state['auth_user'] = _e
-                    st.session_state['auth_role'] = 'admin'
+                    st.session_state['auth_role'] = 'owner'
                     st.session_state['auth_src'] = 'secrets'
                 else:
                     _m0 = [u for u in active_users
@@ -1403,7 +1403,7 @@ def check_login():
         if fb and e == str(fb.get('email', '')).strip().lower() \
               and h == str(fb.get('pass_hash', '')).strip().lower():
             st.session_state['auth_user'] = e
-            st.session_state['auth_role'] = 'admin'
+            st.session_state['auth_role'] = 'owner'
             st.session_state['auth_src'] = 'secrets'
             st.query_params['s'] = _make_session_token(e, 'secrets')
             st.rerun()
@@ -1425,7 +1425,7 @@ def main():
     if _user is None:
         return
     if _user == "setup":
-        st.session_state['auth_role'] = 'admin'
+        st.session_state['auth_role'] = 'owner'
         st.session_state['auth_setup_mode'] = True
     else:
         st.session_state.pop('auth_setup_mode', None)
@@ -1456,7 +1456,7 @@ def main():
             "✅ Verified",
             "ℹ️ Instructions",
         ]
-        if st.session_state.get('auth_role') == 'admin':
+        if st.session_state.get('auth_role') in ('admin', 'owner'):
             _pages.append("👥 Users")
         page = st.radio("Select page", _pages, label_visibility="collapsed")
 
@@ -2423,34 +2423,60 @@ def main():
     # PAGE: INSTRUCTIONS
     # ============================================================
     elif page == "👥 Users":
-        render_header("User Management", "Add employees, reset passwords, deactivate access", [LOGO_PAYX])
-        if st.session_state.get('auth_role') != 'admin':
+        render_header("User Management", "Add employees, reset passwords, manage roles", [LOGO_PAYX])
+        _my_role = str(st.session_state.get('auth_role', 'user')).strip().lower()
+        if _my_role not in ('admin', 'owner'):
             st.error("Admins only.")
             return
+        _me = str(st.session_state.get('auth_user', '')).strip().lower()
 
         if 'users_last_msg' in st.session_state:
             st.success(st.session_state.pop('users_last_msg'))
 
         users = load_users()
+
+        def _role_of(u):
+            return str(u.get('role', '')).strip().lower()
+
+        # One-time bootstrap: while no active owner exists, an admin can claim it
+        _owner_exists = any(_is_active(u) and _role_of(u) == 'owner' for u in users)
+        if users and not _owner_exists and _my_role == 'admin':
+            st.info("No owner is defined yet. Owner has full rights, "
+                    "including granting and revoking admin.")
+            if st.button("⭐ Become owner (one-time setup)", key="users_claim_owner"):
+                _mine = next((u for u in users
+                              if str(u.get('email', '')).strip().lower() == _me), None)
+                if _mine:
+                    _ws = _users_ws()
+                    _api_retry(lambda: _ws.update_cell(
+                        _mine['_row'], USERS_COLS.index('role') + 1, 'owner'))
+                    load_users.clear()
+                    st.session_state['auth_role'] = 'owner'
+                    st.session_state['users_last_msg'] = f"⭐ {_me} is now owner."
+                    st.rerun()
+
         if users:
             _udf = pd.DataFrame(users)
             _ucols = [c for c in ['email', 'role', 'active', 'created_by', 'created_at'] if c in _udf.columns]
             st.dataframe(_udf[_ucols], use_container_width=True, hide_index=True)
         else:
-            st.info("No users yet. Create the first admin below.")
+            st.info("No users yet. Create the first owner below.")
 
-        _has_admin = any(_is_active(u) and str(u.get('role', '')).strip().lower() == 'admin'
-                         for u in users)
+        _has_any_admin = any(_is_active(u) and _role_of(u) in ('admin', 'owner')
+                             for u in users)
 
         st.markdown("#### ➕ Add user")
         with st.form("add_user_form"):
             _ne = st.text_input("Email")
             _np = st.text_input("Temporary password (min 8 characters)")
-            if _has_admin:
+            if not _has_any_admin:
+                _nr = "owner"
+                st.caption("First user is created as **owner** (full rights).")
+            elif _my_role == 'owner':
                 _nr = st.selectbox("Role", ["user", "admin"])
             else:
-                _nr = "admin"
-                st.caption("First user is created as **admin** (lockout protection).")
+                _nr = "user"
+                st.caption("Admins can add **user** accounts only.")
             _sub = st.form_submit_button("Add user", type="primary")
         if _sub:
             _e = _ne.strip().lower()
@@ -2474,46 +2500,72 @@ def main():
 
         if users:
             st.markdown("#### 🔧 Manage user")
-            _emails = [u.get('email', '') for u in users]
-            _sel = st.selectbox("Select user", _emails, key="users_manage_sel")
-            _u = next((x for x in users if x.get('email', '') == _sel), None)
-            if _u:
-                _me = str(st.session_state.get('auth_user', '')).strip().lower()
-                _c1, _c2 = st.columns(2)
-                with _c1:
-                    if _is_active(_u):
-                        if _sel.strip().lower() == _me:
-                            st.button("🚫 Deactivate", disabled=True,
-                                      help="You cannot deactivate yourself.")
-                        elif st.button("🚫 Deactivate", key="users_deact"):
-                            _ws = _users_ws()
-                            _api_retry(lambda: _ws.update_cell(
-                                _u['_row'], USERS_COLS.index('active') + 1, '0'))
-                            load_users.clear()
-                            st.session_state['users_last_msg'] = f"✅ {_sel} deactivated."
-                            st.rerun()
-                    else:
-                        if st.button("✅ Activate", key="users_act"):
-                            _ws = _users_ws()
-                            _api_retry(lambda: _ws.update_cell(
-                                _u['_row'], USERS_COLS.index('active') + 1, '1'))
-                            load_users.clear()
-                            st.session_state['users_last_msg'] = f"✅ {_sel} activated."
-                            st.rerun()
-                with _c2:
-                    with st.form("reset_pw_form"):
-                        _rp = st.text_input("New temporary password (min 8 chars)")
-                        _rs = st.form_submit_button("🔑 Reset password")
-                    if _rs:
-                        if len(_rp) < 8:
-                            st.error("Password must be at least 8 characters.")
+            if _my_role == 'owner':
+                _managable = [u for u in users if _role_of(u) != 'owner'
+                              and str(u.get('email', '')).strip().lower() != _me]
+            else:
+                _managable = [u for u in users if _role_of(u) == 'user'
+                              and str(u.get('email', '')).strip().lower() != _me]
+            _emails = [u.get('email', '') for u in _managable]
+            if not _emails:
+                st.info("No accounts available for you to manage."
+                        + (" Admins manage user accounts only." if _my_role == 'admin' else ""))
+            else:
+                _sel = st.selectbox("Select user", _emails, key="users_manage_sel")
+                _u = next((x for x in _managable if x.get('email', '') == _sel), None)
+                if _u:
+                    _c1, _c2, _c3 = st.columns(3)
+                    with _c1:
+                        if _is_active(_u):
+                            if st.button("🚫 Deactivate", key="users_deact"):
+                                _ws = _users_ws()
+                                _api_retry(lambda: _ws.update_cell(
+                                    _u['_row'], USERS_COLS.index('active') + 1, '0'))
+                                load_users.clear()
+                                st.session_state['users_last_msg'] = f"✅ {_sel} deactivated."
+                                st.rerun()
                         else:
-                            _ws = _users_ws()
-                            _api_retry(lambda: _ws.update_cell(
-                                _u['_row'], USERS_COLS.index('pass_hash') + 1, _hash_pw(_rp)))
-                            load_users.clear()
-                            st.session_state['users_last_msg'] = f"✅ Password reset for {_sel}."
-                            st.rerun()
+                            if st.button("✅ Activate", key="users_act"):
+                                _ws = _users_ws()
+                                _api_retry(lambda: _ws.update_cell(
+                                    _u['_row'], USERS_COLS.index('active') + 1, '1'))
+                                load_users.clear()
+                                st.session_state['users_last_msg'] = f"✅ {_sel} activated."
+                                st.rerun()
+                    with _c2:
+                        with st.form("reset_pw_form"):
+                            _rp = st.text_input("New temporary password (min 8 chars)")
+                            _rs = st.form_submit_button("🔑 Reset password")
+                        if _rs:
+                            if len(_rp) < 8:
+                                st.error("Password must be at least 8 characters.")
+                            else:
+                                _ws = _users_ws()
+                                _api_retry(lambda: _ws.update_cell(
+                                    _u['_row'], USERS_COLS.index('pass_hash') + 1, _hash_pw(_rp)))
+                                load_users.clear()
+                                st.session_state['users_last_msg'] = f"✅ Password reset for {_sel}."
+                                st.rerun()
+                    with _c3:
+                        if _my_role == 'owner':
+                            if _role_of(_u) == 'user':
+                                if st.button("⬆ Make admin", key="users_promote"):
+                                    _ws = _users_ws()
+                                    _api_retry(lambda: _ws.update_cell(
+                                        _u['_row'], USERS_COLS.index('role') + 1, 'admin'))
+                                    load_users.clear()
+                                    st.session_state['users_last_msg'] = f"⬆ {_sel} is now admin."
+                                    st.rerun()
+                            elif _role_of(_u) == 'admin':
+                                if st.button("⬇ Make user", key="users_demote"):
+                                    _ws = _users_ws()
+                                    _api_retry(lambda: _ws.update_cell(
+                                        _u['_row'], USERS_COLS.index('role') + 1, 'user'))
+                                    load_users.clear()
+                                    st.session_state['users_last_msg'] = f"⬇ {_sel} is now user."
+                                    st.rerun()
+                        else:
+                            st.caption("Role changes: owner only.")
 
     elif page == "ℹ️ Instructions":
         render_header("Instructions", "How to use the dashboard", [LOGO_PAYX])
