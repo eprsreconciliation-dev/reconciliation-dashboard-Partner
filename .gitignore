@@ -1,0 +1,16 @@
+# Secrets - NEVER commit
+.streamlit/
+
+# Backups and patch scripts
+app_backup*.py
+app_old.py
+patch_app*.py
+
+# Python cache and logs
+__pycache__/
+*.pyc
+*.log
+streamlit_log.txt
+
+# Local history fallback
+history.json
