@@ -97,7 +97,7 @@ st.markdown("""
 # ============================================================
 # CELLCOM PRICE MAP
 # ============================================================
-APP_VERSION = "v2026-07-19-ravkav"
+APP_VERSION = "v2026-07-19-ravkav-esim-cols"
 
 CELLCOM_FIXED = {15.0, 19.0, 25.0, 29.0, 39.9, 49.0}
 CELLCOM_DISCOUNT = 5.0
@@ -2589,15 +2589,23 @@ def main():
 
         st.markdown("---")
         df = pd.DataFrame(month_history_deduped)
+        if op_filter_pre == 'pelephone':
+            def _ecol(_n):
+                if _n in df.columns:
+                    return pd.to_numeric(df[_n], errors='coerce').fillna(0)
+                return pd.Series([0.0] * len(df), index=df.index)
+            df['esim_count'] = _ecol('esim_count').astype(int)
+            df['esim_price_diff'] = (_ecol('esim_sup_total') - _ecol('esim_our_total')).round(2)
         show_cols = [c for c in ['date','operator_tab','matched_count','sup_cbd','our_eup',
-                                  'diff','real_gap','refunds_eup','net_billed'] if c in df.columns]
+                                  'diff','real_gap','esim_count','esim_price_diff',
+                                  'refunds_eup','net_billed'] if c in df.columns]
         _disp = df[show_cols].copy()
         _tot = {c: '' for c in show_cols}
         _tot['date'] = '📊 TOTAL'
         if 'operator_tab' in _tot:
             _tot['operator_tab'] = op_filter_pre
         for _c in ['matched_count', 'sup_cbd', 'our_eup', 'diff', 'real_gap',
-                   'refunds_eup', 'net_billed']:
+                   'esim_count', 'esim_price_diff', 'refunds_eup', 'net_billed']:
             if _c in show_cols:
                 _tot[_c] = round(float(pd.to_numeric(df[_c], errors='coerce').fillna(0).sum()), 2)
         _disp = pd.concat([_disp, pd.DataFrame([_tot])], ignore_index=True)
