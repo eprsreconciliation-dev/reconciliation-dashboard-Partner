@@ -97,7 +97,7 @@ st.markdown("""
 # ============================================================
 # CELLCOM PRICE MAP
 # ============================================================
-APP_VERSION = "v2026-07-19-total-pinned"
+APP_VERSION = "v2026-07-19-verified-search"
 
 CELLCOM_FIXED = {15.0, 19.0, 25.0, 29.0, 39.9, 49.0}
 CELLCOM_DISCOUNT = 5.0
@@ -420,6 +420,7 @@ def load_month_details(operator_tab, month):
     except Exception:
         return []
 
+@st.cache_data(ttl=120, show_spinner=False)
 def load_verified():
     all_records = []
     for op in ['partner', 'pelephone', 'cellcom', 'ravkav']:
@@ -2891,15 +2892,56 @@ def main():
     # PAGE: VERIFIED
     # ============================================================
     elif page == "✅ Verified":
-        render_header("Verified Transactions", "Completed verifications", [LOGO_PAYX])
+        render_header("Verified Transactions", "Completed verifications — who verified what and when", [LOGO_PAYX])
+
+        _vc1, _vc2, _vc3, _vc4 = st.columns([2, 2, 3, 1])
+        with _vc1:
+            v_op = st.selectbox("Operator:",
+                                ["All", "partner", "pelephone", "cellcom", "ravkav"],
+                                key="ver_op")
+        with _vc2:
+            v_status = st.selectbox("Status:",
+                                    ["All", "✅ Found", "❌ Not found", "🔵 Duplicate"],
+                                    key="ver_status")
+        with _vc3:
+            v_phone = st.text_input("🔍 Search by phone / card number:",
+                                    key="ver_phone", placeholder="e.g. 0541234567")
+        with _vc4:
+            st.write("")
+            if st.button("🔄 Refresh", key="ver_refresh", use_container_width=True):
+                load_verified.clear()
+                st.rerun()
+
         verified = load_verified()
         if not verified:
             st.info("No verified transactions yet.")
             return
-        df = pd.DataFrame(verified)
+
+        rows = verified
+        if v_op != "All":
+            rows = [r for r in rows if str(r.get('operator_tab', '')) == v_op]
+        if v_status != "All":
+            _pref = v_status.split()[0]
+            rows = [r for r in rows if str(r.get('verified', '')).startswith(_pref)]
+        if v_phone:
+            _q = v_phone.strip().replace(' ', '').lstrip('0')
+            rows = [r for r in rows
+                    if _q and _q in str(r.get('phone', '')).replace('.0', '')
+                                                           .replace(' ', '').lstrip('0')]
+
+        st.caption(f"Showing {len(rows)} of {len(verified)} verified records "
+                   f"(data refreshes within ~2 minutes after a new verification)")
+        if not rows:
+            st.info("No results for the current filter.")
+            return
+        df = pd.DataFrame(rows)
+        try:
+            df = df.sort_values('date', ascending=False)
+        except Exception:
+            pass
         show_cols = [c for c in ['date','operator_tab','category','phone','product','amount','verified','verified_by','verified_at','check_instruction'] if c in df.columns]
         st.dataframe(df[show_cols], use_container_width=True, hide_index=True)
-        st.success(f"✅ {len(verified)} transactions verified")
+        st.success(f"✅ {len(verified)} transactions verified in total")
 
     # ============================================================
     # PAGE: INSTRUCTIONS
