@@ -97,7 +97,7 @@ st.markdown("""
 # ============================================================
 # CELLCOM PRICE MAP
 # ============================================================
-APP_VERSION = "v2026-07-19-ravkav-esim-cols"
+APP_VERSION = "v2026-07-19-ravkav-fix"
 
 CELLCOM_FIXED = {15.0, 19.0, 25.0, 29.0, 39.9, 49.0}
 CELLCOM_DISCOUNT = 5.0
@@ -1158,13 +1158,16 @@ def run_recon_ravkav(our_df, sup_totals, sup_det, report_date):
     """Totals comparison + optional uid-level detailed comparison."""
     act = our_df['Action'] if 'Action' in our_df.columns else 'PURCHASE'
     stat = our_df['Status'] if 'Status' in our_df.columns else ''
-    done = our_df[(act == 'PURCHASE') & (stat == 'DONE')].copy()
+    done_all = our_df[(act == 'PURCHASE') & (stat == 'DONE')].copy()
+    done = done_all[done_all['uid'] != ''].copy()          # comparable with RavKav
+    adjustments = done_all[done_all['uid'] == ''].copy()   # anomaly: DONE purchase without uid
     failed = our_df[stat == 'FAILED'].copy()
-    cancelled = our_df[stat == 'CANCELLED'].copy()
-    adjustments = done[done['uid'] == ''].copy()
+    cancelled = our_df[stat == 'CANCELLED'].copy()         # refunded on RavKav side (זוכה)
+    client_refunds = our_df[(act == 'REFUND') & (stat == 'DONE')].copy()  # our credits to clients, no uid
 
     our_charged = round(float(done['End User Price'].sum()), 2)
     our_refunded = round(float(cancelled['End User Price'].sum()), 2)
+    client_ref_sum = round(float(client_refunds['End User Price'].sum()), 2) if len(client_refunds) else 0.0
 
     t = {
         'done_count': len(done), 'failed_count': len(failed),
@@ -1174,8 +1177,9 @@ def run_recon_ravkav(our_df, sup_totals, sup_det, report_date):
         'our_charged': our_charged, 'our_refunded': our_refunded,
         'sup_charged': None, 'sup_refunded': None, 'sup_net': None,
         'gap_charged': 0.0, 'gap_refunded': 0.0, 'gap_net': 0.0,
+        'client_ref_count': len(client_refunds), 'client_ref_sum': client_ref_sum,
         'matched_count': len(done), 'pending_count': 0,
-        'refunds_count': len(cancelled), 'refunds_eup': round(-our_refunded, 2),
+        'refunds_count': len(client_refunds), 'refunds_eup': client_ref_sum,
     }
     if sup_totals:
         t['sup_charged'] = sup_totals['charged']
@@ -1302,11 +1306,19 @@ def run_recon_ravkav(our_df, sup_totals, sup_det, report_date):
     else:
         t['real_gap'] = 0.0
 
-    refunds_df = pd.DataFrame([{
-        'Operator': 'RavKav', 'Phone_Display': str(r.get('Phone Number', '')),
-        'Date & Time': str(r.get('Date & Time', '')), 'Product Name': 'RavKav',
-        'End User Price': float(r.get('End User Price', 0)),
-    } for _, r in cancelled.iterrows()])
+    refunds_df = pd.DataFrame(
+        [{
+            'Operator': 'RavKav', 'Phone_Display': str(r.get('Phone Number', '')),
+            'Date & Time': str(r.get('Date & Time', '')),
+            'Product Name': 'Client refund (internal)',
+            'End User Price': float(r.get('End User Price', 0)),
+        } for _, r in client_refunds.iterrows()] +
+        [{
+            'Operator': 'RavKav', 'Phone_Display': str(r.get('Phone Number', '')),
+            'Date & Time': str(r.get('Date & Time', '')),
+            'Product Name': 'Refunded by RavKav',
+            'End User Price': float(r.get('End User Price', 0)),
+        } for _, r in cancelled.iterrows()])
 
     return {'matched': pd.DataFrame(), 'sup_only': sup_only_df, 'our_only': our_only_df,
             'refunds': refunds_df, 'failed': failed, 'totals': t, 'detailed': detailed}
@@ -2396,7 +2408,7 @@ def main():
             c1.metric("✅ Charged (ours)", t['done_count'],
                       delta=f"{t['our_charged']:,.2f} NIS", delta_color="off")
             c2.metric("🔴 Failed (ours)", t['failed_count'])
-            c3.metric("↩️ Refunded (ours)", t['cancelled_count'],
+            c3.metric("↩️ RavKav-refunded", t['cancelled_count'],
                       delta=f"{t['our_refunded']:,.2f} NIS", delta_color="off")
             if t.get('sup_charged') is not None:
                 c4.metric("RavKav charged", f"{t['sup_charged']:,.2f} NIS",
@@ -2404,6 +2416,11 @@ def main():
                 c5.metric("📊 Gap", f"{t['gap_net']:,.2f} NIS",
                           delta="RavKav net minus our net",
                           delta_color="inverse" if abs(t['gap_net']) > 0.009 else "off")
+
+            if t.get('client_ref_count'):
+                st.caption(f"🧾 Our client refunds (internal, no RavKav uid): "
+                           f"{t['client_ref_count']} row(s), {t['client_ref_sum']:,.2f} NIS — "
+                           f"included in net billing, excluded from the RavKav comparison.")
 
             if t.get('sup_charged') is not None:
                 if abs(t['gap_charged']) < 0.01 and abs(t['gap_refunded']) < 0.01:
@@ -2473,7 +2490,7 @@ def main():
                         'our_only_eup': round(t['our_only_eup'], 2),
                         'real_gap': round(t['real_gap'], 2), 'pending_count': 0,
                         'refunds_eup': round(t['refunds_eup'], 2),
-                        'net_billed': round(t['our_charged'] - t['our_refunded'], 2),
+                        'net_billed': round(t['our_charged'] + t.get('client_ref_sum', 0), 2),
                     }
                     ok, msg = save_to_sheets(record)
                     detail_rows = build_detail_rows(rdate, 'ravkav',
