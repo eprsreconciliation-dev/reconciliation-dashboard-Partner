@@ -97,7 +97,7 @@ st.markdown("""
 # ============================================================
 # CELLCOM PRICE MAP
 # ============================================================
-APP_VERSION = "v2026-07-19-ravkav-fix"
+APP_VERSION = "v2026-07-19-total-pinned"
 
 CELLCOM_FIXED = {15.0, 19.0, 25.0, 29.0, 39.9, 49.0}
 CELLCOM_DISCOUNT = 5.0
@@ -2625,8 +2625,8 @@ def main():
                    'esim_count', 'esim_price_diff', 'refunds_eup', 'net_billed']:
             if _c in show_cols:
                 _tot[_c] = round(float(pd.to_numeric(df[_c], errors='coerce').fillna(0).sum()), 2)
-        _disp = pd.concat([_disp, pd.DataFrame([_tot])], ignore_index=True)
-        st.dataframe(_disp, use_container_width=True, hide_index=True)
+        st.dataframe(_disp, use_container_width=True, hide_index=True, height=420)
+        st.dataframe(pd.DataFrame([_tot]), use_container_width=True, hide_index=True)
         if op_filter_pre == 'pelephone' and 'esim_count' in df.columns:
             _en = pd.to_numeric(df['esim_count'], errors='coerce').fillna(0).sum()
             _eo = pd.to_numeric(df.get('esim_our_total'), errors='coerce').fillna(0).sum()
